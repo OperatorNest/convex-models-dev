@@ -1,6 +1,6 @@
 {
   "name": "@operatornest/convex-models-dev",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "models.dev for Convex: a live catalog of AI models, limits and pricing with cost estimation.",
   "keywords": [
     "ai",
