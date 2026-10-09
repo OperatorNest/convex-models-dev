@@ -1,0 +1,98 @@
+name: Bug report
+description: Report a reproducible component or client failure.
+labels: ["type:bug", "status:needs-triage"]
+body:
+  - type: input
+    id: package_version
+    attributes:
+      label: Package version
+      placeholder: e.g. 0.2.1, or commit SHA for an unreleased checkout
+    validations:
+      required: true
+  - type: input
+    id: convex_version
+    attributes:
+      label: Convex version
+    validations:
+      required: true
+  - type: input
+    id: node_version
+    attributes:
+      label: Node.js version
+    validations:
+      required: true
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Convex runtime
+      options: [Convex cloud, Self-hosted, Local backend]
+    validations:
+      required: true
+  - type: textarea
+    id: sync_status
+    attributes:
+      label: Sync status (sync.status)
+      description: Provide when relevant; paste the returned sync.status object and redact sensitive values. Leave blank if not applicable or unavailable.
+    validations:
+      required: false
+  - type: input
+    id: last_successful_sync
+    attributes:
+      label: Last successful sync
+      description: Provide when relevant; include the timestamp, or write “never” or “unknown”. Leave blank if not applicable or unavailable.
+    validations:
+      required: false
+  - type: input
+    id: sync_source
+    attributes:
+      label: Sync source
+      description: Provide when relevant; state the configured catalog source. Leave blank if not applicable or unavailable.
+    validations:
+      required: false
+  - type: input
+    id: provider_model_ids
+    attributes:
+      label: Provider and model IDs
+      description: Provide when relevant; include public catalog IDs. Leave blank if not applicable or unavailable.
+    validations:
+      required: false
+  - type: textarea
+    id: sync_guards_config
+    attributes:
+      label: Sync guards or configuration context
+      description: Provide when relevant; include configured guard values and non-sensitive sync configuration. Leave blank if not applicable or unavailable.
+    validations:
+      required: false
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include the smallest code or steps that reproduce the issue. Redact sensitive data.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Optional logs
+      description: Do not include credentials, access tokens, private customer data, or unredacted logs. Provider and model identifiers are public catalog identifiers; omit private prompts or usage data.
+    validations:
+      required: false
+  - type: checkboxes
+    id: issue_search
+    attributes:
+      label: Existing reports
+      options:
+        - label: I searched existing issues and discussions.
+          required: true
