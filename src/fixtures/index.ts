@@ -13,25 +13,33 @@ export function fixtureJson(mutate?: (catalog: Catalog) => void): string {
   return JSON.stringify(catalog);
 }
 
-export function providerOf(catalog: Catalog, providerId: string): Catalog[string] {
-  const provider = catalog[providerId];
-  if (!provider) throw new Error(`fixture provider ${providerId} missing`);
+export function providerOf(catalog: Catalog, modelsDevProviderId: string): Catalog[string] {
+  const provider = catalog[modelsDevProviderId];
+  if (!provider) throw new Error(`fixture provider ${modelsDevProviderId} missing`);
   return provider;
 }
 
-export function modelsOf(catalog: Catalog, providerId: string): Record<string, RawModel> {
-  return providerOf(catalog, providerId).models;
+export function modelsOf(catalog: Catalog, modelsDevProviderId: string): Record<string, RawModel> {
+  return providerOf(catalog, modelsDevProviderId).models;
 }
 
-export function rawModel(catalog: Catalog, providerId: string, modelId: string): RawModel {
-  const model = modelsOf(catalog, providerId)[modelId];
-  if (!model) throw new Error(`fixture model ${providerId}/${modelId} missing`);
+export function rawModel(
+  catalog: Catalog,
+  modelsDevProviderId: string,
+  modelsDevModelId: string,
+): RawModel {
+  const model = modelsOf(catalog, modelsDevProviderId)[modelsDevModelId];
+  if (!model) throw new Error(`fixture model ${modelsDevProviderId}/${modelsDevModelId} missing`);
   return model;
 }
 
-export function fixtureModel(providerId: string, modelId: string): ModelRow {
-  const row = normalizeModel(providerId, modelId, rawModel(fixtureCatalog, providerId, modelId));
-  if (!row) throw new Error(`fixture model ${providerId}/${modelId} invalid`);
+export function fixtureModel(modelsDevProviderId: string, modelsDevModelId: string): ModelRow {
+  const row = normalizeModel(
+    modelsDevProviderId,
+    modelsDevModelId,
+    rawModel(fixtureCatalog, modelsDevProviderId, modelsDevModelId),
+  );
+  if (!row) throw new Error(`fixture model ${modelsDevProviderId}/${modelsDevModelId} invalid`);
   return row;
 }
 

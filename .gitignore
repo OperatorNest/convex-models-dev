@@ -6,3 +6,4 @@ dist/
 coverage/
 *.tsbuildinfo
 *.tgz
+example/convex/_generated/ai/

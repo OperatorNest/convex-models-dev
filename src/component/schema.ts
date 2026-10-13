@@ -15,7 +15,7 @@ export default defineSchema({
     ...providerFields,
     contentHash: v.string(),
     updatedAt: v.number(),
-  }).index("by_providerId", ["providerId"]),
+  }).index("by_modelsDevProviderId", ["modelsDevProviderId"]),
 
   models: defineTable({
     ...modelFields,
@@ -23,24 +23,27 @@ export default defineSchema({
     firstSeenAt: v.number(),
     updatedAt: v.number(),
   })
-    .index("by_providerId_and_modelId", ["providerId", "modelId"])
-    .index("by_canonicalModelId_and_hasCost_and_costOrder", [
-      "canonicalModelId",
+    .index("by_modelsDevProviderId_and_modelsDevModelId", [
+      "modelsDevProviderId",
+      "modelsDevModelId",
+    ])
+    .index("by_modelsDevCanonicalModelId_and_hasCost_and_costOrder", [
+      "modelsDevCanonicalModelId",
       "hasCost",
       "costOrder",
     ])
-    .index("by_providerId_and_releaseDate", ["providerId", "releaseDate"])
+    .index("by_modelsDevProviderId_and_releaseDate", ["modelsDevProviderId", "releaseDate"])
     .index("by_family_and_releaseDate", ["family", "releaseDate"])
     .index("by_releaseDate", ["releaseDate"])
-    .index("by_contextLimit", ["contextLimit"])
-    .index("by_providerId_and_contextLimit", ["providerId", "contextLimit"])
-    .index("by_family_and_contextLimit", ["family", "contextLimit"])
-    .index("by_providerId_and_costBlended", ["providerId", "costBlended"])
+    .index("by_context", ["context"])
+    .index("by_modelsDevProviderId_and_context", ["modelsDevProviderId", "context"])
+    .index("by_family_and_context", ["family", "context"])
+    .index("by_modelsDevProviderId_and_costBlended", ["modelsDevProviderId", "costBlended"])
     .index("by_family_and_costBlended", ["family", "costBlended"])
     .index("by_costBlended", ["costBlended"])
     .searchIndex("search_name", {
       searchField: "searchText",
-      filterFields: ["providerId", "family"],
+      filterFields: ["modelsDevProviderId", "family"],
     }),
 
   syncState: defineTable({
@@ -59,15 +62,19 @@ export default defineSchema({
   }),
 
   priceChanges: defineTable({
-    providerId: v.string(),
-    modelId: v.string(),
-    at: v.number(),
+    modelsDevProviderId: v.string(),
+    modelsDevModelId: v.string(),
+    changedAt: v.number(),
     kind: priceChangeKindValidator,
     before: v.optional(pricingSnapshotValidator),
     after: v.optional(pricingSnapshotValidator),
   })
-    .index("by_providerId_and_modelId_and_at", ["providerId", "modelId", "at"])
-    .index("by_at", ["at"]),
+    .index("by_modelsDevProviderId_and_modelsDevModelId_and_changedAt", [
+      "modelsDevProviderId",
+      "modelsDevModelId",
+      "changedAt",
+    ])
+    .index("by_changedAt", ["changedAt"]),
 
   config: defineTable({
     enabled: v.optional(v.boolean()),

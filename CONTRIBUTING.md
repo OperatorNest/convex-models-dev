@@ -23,8 +23,16 @@ Initialize only an anonymous local deployment for codegen. Smoke creates a dispo
   (`feat:`, `fix:`, `docs:`, `test:`, `chore:`); a breaking change adds `!` after the type.
 - Until 1.0.0, a breaking change ships without compatibility code, deprecation periods or data
   migrations; its changeset is a `minor` bump that states what breaks.
-
-Update affected examples, README claims and ADR contracts. Add a changeset for consumer-visible changes. Keep reads bounded, indexed and lease-fenced writes intact; use fixed package errors. Regenerate bindings from inputs and include their diffs. Never include credentials or private prompts in fixtures or logs. Run the checks listed in AGENTS.md and report their exit codes.
+- Add a changeset for every consumer-visible change to `@operatornest/convex-models-dev`.
+- Public component functions have `args` and `returns` validators; reads are bounded and indexed.
+- Errors on caller-reachable paths come from `modelsDevError` in `src/shared/errors.ts`; add each
+  `MODELS_DEV_` code, its fixed message and its README Errors row together.
+- No Node built-ins, `Buffer` or `process` in `src/`. Read provider credentials and master keys
+  only through generated component env; never put them in arguments, rows, logs or errors.
+- Tests use generated credentials or fixed test-only vectors and stub external requests.
+- Regenerate committed bindings from their inputs with `pnpm build:codegen`.
+- Update affected examples, README claims and ADR contracts. Run the checks in AGENTS.md and
+  report commands and exit codes.
 
 ## Reports and releases
 

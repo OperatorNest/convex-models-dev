@@ -5,15 +5,15 @@ import schema from "./schema.js";
 export const list = query({
   args: {},
   returns: v.array(schema.doc("providers")),
-  handler: (ctx) => ctx.db.query("providers").withIndex("by_providerId").take(500),
+  handler: (ctx) => ctx.db.query("providers").withIndex("by_modelsDevProviderId").take(500),
 });
 
 export const get = query({
-  args: { providerId: v.string() },
+  args: { modelsDevProviderId: v.string() },
   returns: v.union(schema.doc("providers"), v.null()),
-  handler: (ctx, { providerId }) =>
+  handler: (ctx, { modelsDevProviderId }) =>
     ctx.db
       .query("providers")
-      .withIndex("by_providerId", (q) => q.eq("providerId", providerId))
+      .withIndex("by_modelsDevProviderId", (q) => q.eq("modelsDevProviderId", modelsDevProviderId))
       .first(),
 });

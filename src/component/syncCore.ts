@@ -49,7 +49,7 @@ class LeaseLost extends Error {
 
 function failureData(
   error: unknown,
-  code: "MODELS_DEV_FETCH_FAILED" | "MODELS_DEV_SYNC_FAILED",
+  code: "MODELS_DEV_NETWORK_ERROR" | "MODELS_DEV_SYNC_FAILED",
 ): ModelsDevErrorData {
   return isModelsDevError(error) ? error.data : modelsDevError(code).data;
 }
@@ -59,7 +59,7 @@ async function readCatalog(response: Response): Promise<Uint8Array<ArrayBuffer>>
     await response.body?.cancel();
     throw modelsDevError("MODELS_DEV_CATALOG_TOO_LARGE");
   }
-  if (!response.body) throw modelsDevError("MODELS_DEV_INVALID_CATALOG");
+  if (!response.body) throw modelsDevError("MODELS_DEV_INVALID_RESPONSE");
   const reader = response.body.getReader();
   const buffer = new ArrayBuffer(MAX_CATALOG_BYTES);
   const data = new Uint8Array(buffer);
@@ -104,7 +104,10 @@ async function loadCatalog(
     }
     if (!response.ok) {
       await response.body?.cancel();
-      throw modelsDevError("MODELS_DEV_FETCH_FAILED", response.status);
+      throw modelsDevError("MODELS_DEV_PROVIDER_ERROR", {
+        providerStatus: response.status,
+        retryable: response.status === 429 || response.status >= 500,
+      });
     }
     const responseEtag = response.headers.get("etag");
     etag =
@@ -127,11 +130,11 @@ async function loadCatalog(
   try {
     parsed = JSON.parse(text);
   } catch {
-    throw modelsDevError("MODELS_DEV_INVALID_CATALOG");
+    throw modelsDevError("MODELS_DEV_INVALID_RESPONSE");
   }
   text = null;
 
-  if (!isRecord(parsed)) throw modelsDevError("MODELS_DEV_INVALID_CATALOG");
+  if (!isRecord(parsed)) throw modelsDevError("MODELS_DEV_INVALID_RESPONSE");
   const shape = inspectCatalog(parsed);
   if (shape.providerCount < config.minProviders || shape.modelCount < config.minModels) {
     throw modelsDevError("MODELS_DEV_CATALOG_TOO_SMALL");
@@ -146,8 +149,8 @@ async function loadCatalog(
   };
 }
 
-function identity(providerId: string, modelId: string) {
-  return JSON.stringify([providerId, modelId]);
+function identity(modelsDevProviderId: string, modelsDevModelId: string) {
+  return JSON.stringify([modelsDevProviderId, modelsDevModelId]);
 }
 
 async function applyCatalog(
@@ -158,8 +161,12 @@ async function applyCatalog(
   const { catalog } = loaded;
   const keep = new Set<string>();
 
-  const snapshot: { id: Id<"models">; providerId: string; modelId: string; hasCost: boolean }[] =
-    [];
+  const snapshot: {
+    modelId: Id<"models">;
+    modelsDevProviderId: string;
+    modelsDevModelId: string;
+    hasCost: boolean;
+  }[] = [];
   let snapshotCursor: string | null = null;
   for (;;) {
     const page: Awaited<ReturnType<typeof pageModels>> = await pageModels(ctx, snapshotCursor);
@@ -178,26 +185,29 @@ async function applyCatalog(
   };
 
   const providerRows: ProviderInput[] = [];
-  for (const [providerId, provider] of Object.entries(catalog)) {
+  for (const [modelsDevProviderId, provider] of Object.entries(catalog)) {
     const models = isRecord(provider) ? provider.models : undefined;
     const count = isRecord(models) ? Object.keys(models).length : 0;
-    const row = isRecord(models) ? normalizeProvider(providerId, provider, count) : null;
+    const row = isRecord(models) ? normalizeProvider(modelsDevProviderId, provider, count) : null;
     if (!row) continue;
-    usableProviders.add(providerId);
+    usableProviders.add(modelsDevProviderId);
     providerRows.push({ ...row, contentHash: await rowHash(row) });
   }
   let priced = 0;
   let lostPrices = 0;
   for (const entry of snapshot) {
-    if (!usableProviders.has(entry.providerId) && keepProviders.has(entry.providerId))
-      keep.add(identity(entry.providerId, entry.modelId));
+    if (
+      !usableProviders.has(entry.modelsDevProviderId) &&
+      keepProviders.has(entry.modelsDevProviderId)
+    )
+      keep.add(identity(entry.modelsDevProviderId, entry.modelsDevModelId));
     if (!entry.hasCost) continue;
     priced++;
-    if (!usableProviders.has(entry.providerId)) continue;
-    const provider = catalog[entry.providerId];
+    if (!usableProviders.has(entry.modelsDevProviderId)) continue;
+    const provider = catalog[entry.modelsDevProviderId];
     const models = isRecord(provider) ? provider.models : undefined;
-    const raw = isRecord(models) ? models[entry.modelId] : undefined;
-    const row = normalizeModel(entry.providerId, entry.modelId, raw);
+    const raw = isRecord(models) ? models[entry.modelsDevModelId] : undefined;
+    const row = normalizeModel(entry.modelsDevProviderId, entry.modelsDevModelId, raw);
     if (row && !row.hasCost) lostPrices++;
   }
   if (!opts.force && lostPrices > priced * REMOVAL_GUARD_FRACTION)
@@ -242,14 +252,14 @@ async function applyCatalog(
     totals.priceChanges += result.priceChanges;
   };
 
-  for (const providerId of Object.keys(catalog)) {
-    const provider = catalog[providerId];
-    if (!usableProviders.has(providerId)) continue;
+  for (const modelsDevProviderId of Object.keys(catalog)) {
+    const provider = catalog[modelsDevProviderId];
+    if (!usableProviders.has(modelsDevProviderId)) continue;
     const models = isRecord(provider) ? provider.models : undefined;
     if (isRecord(models)) {
-      for (const [modelId, raw] of Object.entries(models)) {
-        keep.add(identity(providerId, modelId));
-        const row = normalizeModel(providerId, modelId, raw);
+      for (const [modelsDevModelId, raw] of Object.entries(models)) {
+        keep.add(identity(modelsDevProviderId, modelsDevModelId));
+        const row = normalizeModel(modelsDevProviderId, modelsDevModelId, raw);
         if (!row) {
           continue;
         }
@@ -266,8 +276,8 @@ async function applyCatalog(
   await flush();
 
   const stale = snapshot
-    .filter((entry) => !keep.has(identity(entry.providerId, entry.modelId)))
-    .map((entry) => entry.id);
+    .filter((entry) => !keep.has(identity(entry.modelsDevProviderId, entry.modelsDevModelId)))
+    .map((entry) => entry.modelId);
   const existing = snapshot.length;
 
   let removalSkipped = false;
@@ -278,7 +288,7 @@ async function applyCatalog(
       for (let i = 0; i < stale.length; i += CHUNK_SIZE) {
         const result = await ctx.runMutation(internal.sync.removeModels, {
           runId: opts.runId,
-          ids: stale.slice(i, i + CHUNK_SIZE),
+          modelIds: stale.slice(i, i + CHUNK_SIZE),
         });
         if (result.leaseLost) throw new LeaseLost();
         totals.removed += result.removed;
@@ -294,7 +304,7 @@ async function applyCatalog(
       providerCursor,
     );
     for (const entry of page.page) {
-      if (!keepProviders.has(entry.providerId)) staleProviders.push(entry.id);
+      if (!keepProviders.has(entry.modelsDevProviderId)) staleProviders.push(entry.providerId);
     }
     if (page.isDone) break;
     providerCursor = page.continueCursor;
@@ -303,7 +313,7 @@ async function applyCatalog(
     for (let i = 0; i < staleProviders.length; i += CHUNK_SIZE) {
       const result = await ctx.runMutation(internal.sync.removeProviders, {
         runId: opts.runId,
-        ids: staleProviders.slice(i, i + CHUNK_SIZE),
+        providerIds: staleProviders.slice(i, i + CHUNK_SIZE),
       });
       if (result.leaseLost) throw new LeaseLost();
     }
@@ -345,12 +355,12 @@ export async function runSync(
         loaded = await loadCatalog(url, state, config);
         break;
       } catch (error) {
-        errors.push({ source: activeSource, ...failureData(error, "MODELS_DEV_FETCH_FAILED") });
+        errors.push({ source: activeSource, ...failureData(error, "MODELS_DEV_NETWORK_ERROR") });
       }
     }
     if (!loaded) {
-      const failure = errors[0] ?? modelsDevError("MODELS_DEV_FETCH_FAILED").data;
-      throw modelsDevError(failure.code, failure.providerStatus);
+      const failure = errors[0] ?? modelsDevError("MODELS_DEV_PROVIDER_ERROR").data;
+      throw modelsDevError(failure.code, failure);
     }
 
     if (loaded.kind === "not_modified") {
@@ -402,8 +412,10 @@ export async function runSync(
     if (error instanceof LeaseLost) {
       return {
         status: "error",
-        error: modelsDevError("MODELS_DEV_LEASE_LOST").data,
-        errors,
+        errors: [
+          ...errors,
+          { source: activeSource, ...modelsDevError("MODELS_DEV_LEASE_LOST").data },
+        ],
         durationMs: Date.now() - started,
       };
     }
@@ -416,6 +428,6 @@ export async function runSync(
       errors,
       durationMs: Date.now() - started,
     });
-    return { status: "error", error: data, errors, durationMs: Date.now() - started };
+    return { status: "error", errors, durationMs: Date.now() - started };
   }
 }

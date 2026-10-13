@@ -1,13 +1,7 @@
 import { modelsDevError } from "./errors.js";
 import { isRecord } from "./guards.js";
 import { jsonBytes, utf8Bytes, wellFormed } from "./bounds.js";
-import type {
-  ModelRow,
-  PriceFields,
-  PriceTier,
-  PricingSnapshot,
-  ProviderRow,
-} from "./validators.js";
+import type { ModelRow, CostFields, CostTier, PricingSnapshot, ProviderRow } from "./validators.js";
 
 const MODALITY_BITS: Record<string, number> = { text: 1, audio: 2, image: 4, video: 8, pdf: 16 };
 const MODE_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
@@ -20,10 +14,10 @@ export function modalityMask(modalities: readonly string[]): number {
 
 const INDEX_STRING_BYTES = 1024;
 const INDEX_STRING_FIELDS = [
-  "providerId",
-  "modelId",
+  "modelsDevProviderId",
+  "modelsDevModelId",
   "family",
-  "canonicalModelId",
+  "modelsDevCanonicalModelId",
   "releaseDate",
   "searchText",
 ] as const;
@@ -104,9 +98,9 @@ function strings(value: unknown, key: string): string[] {
   return out;
 }
 
-function priceFields(o: Obj): PriceFields {
-  const out: PriceFields = {};
-  const map: [string, keyof PriceFields][] = [
+function priceFields(o: Obj): CostFields {
+  const out: CostFields = {};
+  const map: [string, keyof CostFields][] = [
     ["input", "input"],
     ["output", "output"],
     ["cache_read", "cacheRead"],
@@ -123,11 +117,11 @@ function priceFields(o: Obj): PriceFields {
   return out;
 }
 
-function parseTiers(cost: Obj): PriceTier[] | undefined {
+function parseTiers(cost: Obj): CostTier[] | undefined {
   const raw = cost.tiers;
   if (raw !== undefined) {
     if (!Array.isArray(raw)) throw new Invalid("tiers");
-    const tiers: PriceTier[] = [];
+    const tiers: CostTier[] = [];
     for (const entry of raw) {
       if (!isRecord(entry)) throw new Invalid("tiers");
       const tier = entry.tier;
@@ -185,7 +179,11 @@ function parseModes(raw: unknown): ModelRow["modes"] {
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-export function normalizeModel(providerId: string, modelId: string, raw: unknown): ModelRow | null {
+export function normalizeModel(
+  modelsDevProviderId: string,
+  modelsDevModelId: string,
+  raw: unknown,
+): ModelRow | null {
   if (!isRecord(raw)) return null;
   try {
     const name = reqString(raw, "name");
@@ -197,18 +195,19 @@ export function normalizeModel(providerId: string, modelId: string, raw: unknown
     const family = optString(raw, "family");
 
     const row: ModelRow = {
-      providerId,
-      modelId,
+      modelsDevProviderId,
+      modelsDevModelId,
       name,
-      searchText: `${name} ${modelId} ${family ?? ""} ${providerId}`.toLowerCase(),
+      searchText:
+        `${name} ${modelsDevModelId} ${family ?? ""} ${modelsDevProviderId}`.toLowerCase(),
       attachment: reqBool(raw, "attachment"),
       reasoning: reqBool(raw, "reasoning"),
       toolCall: reqBool(raw, "tool_call"),
       openWeights: reqBool(raw, "open_weights"),
       inputMask: modalityMask(inputModalities),
       outputMask: modalityMask(outputModalities),
-      contextLimit: num(limit.context, "limit.context"),
-      outputLimit: num(limit.output, "limit.output"),
+      context: num(limit.context, "limit.context"),
+      output: num(limit.output, "limit.output"),
       releaseDate: date(raw, "release_date"),
       lastUpdated: date(raw, "last_updated"),
       hasCost: false,
@@ -217,14 +216,17 @@ export function normalizeModel(providerId: string, modelId: string, raw: unknown
     const assign = <K extends keyof ModelRow>(key: K, value: ModelRow[K] | undefined) => {
       if (value !== undefined) row[key] = value;
     };
-    assign("canonicalModelId", optString(raw, "canonical_model_id"));
+    assign("modelsDevCanonicalModelId", optString(raw, "canonical_model_id"));
     assign("family", family);
     assign("description", optString(raw, "description"));
     assign("structuredOutput", optBool(raw, "structured_output"));
     assign("temperature", optBool(raw, "temperature"));
-    assign("status", optString(raw, "status"));
+    const status = optString(raw, "status");
+    if (status !== undefined && status !== "alpha" && status !== "beta" && status !== "deprecated")
+      throw new Invalid("status");
+    assign("status", status);
     assign("knowledge", optString(raw, "knowledge"));
-    assign("inputLimit", optNum(limit, "input"));
+    assign("input", optNum(limit, "input"));
     assign("reasoningOptions", parseReasoningOptions(raw.reasoning_options));
     if (raw.interleaved === true) row.interleaved = true;
     else if (isRecord(raw.interleaved) && typeof raw.interleaved.field === "string") {
@@ -253,11 +255,11 @@ export function normalizeModel(providerId: string, modelId: string, raw: unknown
 
     const provider = raw.provider;
     if (isRecord(provider)) {
-      const override: NonNullable<ModelRow["providerOverride"]> = {};
+      const override: NonNullable<ModelRow["provider"]> = {};
       if (typeof provider.npm === "string") override.npm = provider.npm;
       if (typeof provider.api === "string") override.api = provider.api;
       if (typeof provider.shape === "string") override.shape = provider.shape;
-      if (Object.keys(override).length > 0) row.providerOverride = override;
+      if (Object.keys(override).length > 0) row.provider = override;
     }
     return rowFits(row) &&
       INDEX_STRING_FIELDS.every((field) => {
@@ -273,16 +275,20 @@ export function normalizeModel(providerId: string, modelId: string, raw: unknown
 }
 
 export function normalizeProvider(
-  providerId: string,
+  modelsDevProviderId: string,
   raw: unknown,
   modelCount: number,
 ): ProviderRow | null {
-  if (!isRecord(raw) || !wellFormed(providerId) || utf8Bytes(providerId) > INDEX_STRING_BYTES)
+  if (
+    !isRecord(raw) ||
+    !wellFormed(modelsDevProviderId) ||
+    utf8Bytes(modelsDevProviderId) > INDEX_STRING_BYTES
+  )
     return null;
   try {
     const row: ProviderRow = {
-      providerId,
-      name: optString(raw, "name") ?? providerId,
+      modelsDevProviderId,
+      name: optString(raw, "name") ?? modelsDevProviderId,
       env: raw.env === undefined ? [] : strings(raw.env, "env"),
       modelCount,
     };
@@ -300,19 +306,19 @@ export function normalizeProvider(
 export type CatalogShape = { providerCount: number; modelCount: number; skippedModels: number };
 
 export function inspectCatalog(raw: unknown): CatalogShape {
-  if (!isRecord(raw)) throw modelsDevError("MODELS_DEV_INVALID_CATALOG");
+  if (!isRecord(raw)) throw modelsDevError("MODELS_DEV_INVALID_RESPONSE");
   let providerCount = 0;
   let modelCount = 0;
   let skippedModels = 0;
-  for (const [providerId, provider] of Object.entries(raw)) {
+  for (const [modelsDevProviderId, provider] of Object.entries(raw)) {
     if (!isRecord(provider) || !isRecord(provider.models)) continue;
-    if (!normalizeProvider(providerId, provider, Object.keys(provider.models).length)) {
+    if (!normalizeProvider(modelsDevProviderId, provider, Object.keys(provider.models).length)) {
       skippedModels += Object.keys(provider.models).length;
       continue;
     }
     let usable = 0;
-    for (const [modelId, model] of Object.entries(provider.models)) {
-      if (normalizeModel(providerId, modelId, model)) usable++;
+    for (const [modelsDevModelId, model] of Object.entries(provider.models)) {
+      if (normalizeModel(modelsDevProviderId, modelsDevModelId, model)) usable++;
       else skippedModels++;
     }
     if (usable > 0) providerCount++;

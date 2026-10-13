@@ -6,10 +6,15 @@ import { query, type QueryCtx } from "./_generated/server.js";
 import schema from "./schema.js";
 import { boundedLimit, boundedPage, finiteBounds } from "../shared/bounds.js";
 import { modelsDevError } from "../shared/errors.js";
-import { estimateCost, validateUsage } from "../shared/cost.js";
+import { estimateCost as estimateModelCost, validateUsage } from "../shared/cost.js";
 import { modalityMask } from "../shared/normalize.js";
-import { providerCandidates, splitModelKey } from "../shared/resolve.js";
-import { costEstimateValidator, usageValidator } from "../shared/validators.js";
+import { listProviderCandidates, splitModelKey } from "../shared/resolve.js";
+import {
+  costEstimateValidator,
+  usageValidator,
+  modelStatusValidator,
+  inputTokenScopeValidator,
+} from "../shared/validators.js";
 
 const modelDoc = schema.doc("models");
 const modalityList = v.array(v.string());
@@ -18,19 +23,19 @@ const CHEAPEST_MAX_SCAN = 4000;
 
 const MAX_KEY_PREFIXES = 8;
 
-function findModel(ctx: QueryCtx, providerId: string, modelId: string) {
+function findModel(ctx: QueryCtx, modelsDevProviderId: string, modelsDevModelId: string) {
   return ctx.db
     .query("models")
-    .withIndex("by_providerId_and_modelId", (q) =>
-      q.eq("providerId", providerId).eq("modelId", modelId),
+    .withIndex("by_modelsDevProviderId_and_modelsDevModelId", (q) =>
+      q.eq("modelsDevProviderId", modelsDevProviderId).eq("modelsDevModelId", modelsDevModelId),
     )
     .first();
 }
 
-async function providerExists(ctx: QueryCtx, providerId: string) {
+async function providerExists(ctx: QueryCtx, modelsDevProviderId: string) {
   const row = await ctx.db
     .query("providers")
-    .withIndex("by_providerId", (q) => q.eq("providerId", providerId))
+    .withIndex("by_modelsDevProviderId", (q) => q.eq("modelsDevProviderId", modelsDevProviderId))
     .first();
   return row !== null;
 }
@@ -44,8 +49,8 @@ async function findByKey(ctx: QueryCtx, key: string) {
     [...prefixes].map(async (prefix) => ((await providerExists(ctx, prefix)) ? prefix : null)),
   );
   const known = new Set(checked.filter((prefix) => prefix !== null));
-  const split = splitModelKey(key, (providerId) => known.has(providerId));
-  return split ? findModel(ctx, split.providerId, split.modelId) : null;
+  const split = splitModelKey(key, (modelsDevProviderId) => known.has(modelsDevProviderId));
+  return split ? findModel(ctx, split.modelsDevProviderId, split.modelsDevModelId) : null;
 }
 
 async function resolveRow(
@@ -55,15 +60,18 @@ async function resolveRow(
   aliases: Record<string, string> | undefined,
 ) {
   const rows = await Promise.all(
-    providerCandidates(provider, aliases).map((providerId) => findModel(ctx, providerId, model)),
+    listProviderCandidates(provider, aliases).map((modelsDevProviderId) =>
+      findModel(ctx, modelsDevProviderId, model),
+    ),
   );
   return rows.find((row) => row !== null) ?? null;
 }
 
 export const get = query({
-  args: { providerId: v.string(), modelId: v.string() },
+  args: { modelsDevProviderId: v.string(), modelsDevModelId: v.string() },
   returns: v.union(modelDoc, v.null()),
-  handler: (ctx, { providerId, modelId }) => findModel(ctx, providerId, modelId),
+  handler: (ctx, { modelsDevProviderId, modelsDevModelId }) =>
+    findModel(ctx, modelsDevProviderId, modelsDevModelId),
 });
 
 export const getByKey = query({
@@ -90,16 +98,16 @@ function masks(names: string[] | undefined): number[] {
 
 export const list = query({
   args: {
-    providerId: v.optional(v.string()),
+    modelsDevProviderId: v.optional(v.string()),
     family: v.optional(v.string()),
-    status: v.optional(v.string()),
+    status: v.optional(modelStatusValidator),
     reasoning: v.optional(v.boolean()),
     toolCall: v.optional(v.boolean()),
     structuredOutput: v.optional(v.boolean()),
     openWeights: v.optional(v.boolean()),
     inputModalities: v.optional(modalityList),
     outputModalities: v.optional(modalityList),
-    minContext: v.optional(v.number()),
+    minContextTokens: v.optional(v.number()),
     maxCostInput: v.optional(v.number()),
     includeDeprecated: v.optional(v.boolean()),
     order: v.optional(v.union(v.literal("release"), v.literal("context"), v.literal("cost"))),
@@ -107,39 +115,41 @@ export const list = query({
   },
   returns: paginationResultValidator(modelDoc),
   handler: async (ctx, args) => {
-    finiteBounds(args.minContext, args.maxCostInput);
+    finiteBounds(args.minContextTokens, args.maxCostInput);
     const pagination = boundedPage(args.paginationOpts);
     const order = args.order ?? "release";
-    const { providerId, family, minContext } = args;
+    const { modelsDevProviderId, family, minContextTokens } = args;
     const table = paginator(ctx.db, schema).query("models");
 
     let indexed;
     if (order === "release") {
       indexed =
-        providerId !== undefined
-          ? table.withIndex("by_providerId_and_releaseDate", (q) => q.eq("providerId", providerId))
+        modelsDevProviderId !== undefined
+          ? table.withIndex("by_modelsDevProviderId_and_releaseDate", (q) =>
+              q.eq("modelsDevProviderId", modelsDevProviderId),
+            )
           : family !== undefined
             ? table.withIndex("by_family_and_releaseDate", (q) => q.eq("family", family))
             : table.withIndex("by_releaseDate");
       indexed = indexed.order("desc");
     } else if (order === "context") {
-      const floor = minContext ?? 0;
+      const floor = minContextTokens ?? 0;
       indexed = (
-        providerId !== undefined
-          ? table.withIndex("by_providerId_and_contextLimit", (q) =>
-              q.eq("providerId", providerId).gte("contextLimit", floor),
+        modelsDevProviderId !== undefined
+          ? table.withIndex("by_modelsDevProviderId_and_context", (q) =>
+              q.eq("modelsDevProviderId", modelsDevProviderId).gte("context", floor),
             )
           : family !== undefined
-            ? table.withIndex("by_family_and_contextLimit", (q) =>
-                q.eq("family", family).gte("contextLimit", floor),
+            ? table.withIndex("by_family_and_context", (q) =>
+                q.eq("family", family).gte("context", floor),
               )
-            : table.withIndex("by_contextLimit", (q) => q.gte("contextLimit", floor))
+            : table.withIndex("by_context", (q) => q.gte("context", floor))
       ).order("desc");
     } else {
       indexed =
-        providerId !== undefined
-          ? table.withIndex("by_providerId_and_costBlended", (q) =>
-              q.eq("providerId", providerId).gte("costBlended", 0),
+        modelsDevProviderId !== undefined
+          ? table.withIndex("by_modelsDevProviderId_and_costBlended", (q) =>
+              q.eq("modelsDevProviderId", modelsDevProviderId).gte("costBlended", 0),
             )
           : family !== undefined
             ? table.withIndex("by_family_and_costBlended", (q) =>
@@ -151,7 +161,8 @@ export const list = query({
     const inputBits = masks(args.inputModalities);
     const outputBits = masks(args.outputModalities);
     const passes = (m: Doc<"models">) =>
-      (args.providerId === undefined || m.providerId === args.providerId) &&
+      (args.modelsDevProviderId === undefined ||
+        m.modelsDevProviderId === args.modelsDevProviderId) &&
       (args.family === undefined || m.family === args.family) &&
       (args.status !== undefined
         ? m.status === args.status
@@ -160,7 +171,7 @@ export const list = query({
       (args.toolCall === undefined || m.toolCall === args.toolCall) &&
       (args.structuredOutput === undefined || m.structuredOutput === args.structuredOutput) &&
       (args.openWeights === undefined || m.openWeights === args.openWeights) &&
-      (args.minContext === undefined || m.contextLimit >= args.minContext) &&
+      (args.minContextTokens === undefined || m.context >= args.minContextTokens) &&
       (args.maxCostInput === undefined ||
         (m.hasCost && m.costInput !== undefined && m.costInput <= args.maxCostInput)) &&
       inputBits.every((bit) => (m.inputMask & bit) === bit) &&
@@ -173,12 +184,12 @@ export const list = query({
 export const search = query({
   args: {
     query: v.string(),
-    providerId: v.optional(v.string()),
+    modelsDevProviderId: v.optional(v.string()),
     family: v.optional(v.string()),
     limit: v.optional(v.number()),
   },
   returns: v.array(modelDoc),
-  handler: async (ctx, { query: text, providerId, family, limit }) => {
+  handler: async (ctx, { query: text, modelsDevProviderId, family, limit }) => {
     const count = boundedLimit(limit, 10, 50);
     const term = text.trim().toLowerCase();
     if (!term) return [];
@@ -186,7 +197,8 @@ export const search = query({
       .query("models")
       .withSearchIndex("search_name", (q) => {
         let builder = q.search("searchText", term);
-        if (providerId !== undefined) builder = builder.eq("providerId", providerId);
+        if (modelsDevProviderId !== undefined)
+          builder = builder.eq("modelsDevProviderId", modelsDevProviderId);
         if (family !== undefined) builder = builder.eq("family", family);
         return builder;
       })
@@ -194,15 +206,15 @@ export const search = query({
   },
 });
 
-export const cheapest = query({
+export const listCheapest = query({
   args: {
-    minContext: v.optional(v.number()),
-    minOutput: v.optional(v.number()),
+    minContextTokens: v.optional(v.number()),
+    minOutputTokens: v.optional(v.number()),
     reasoning: v.optional(v.boolean()),
     toolCall: v.optional(v.boolean()),
     structuredOutput: v.optional(v.boolean()),
     inputModalities: v.optional(modalityList),
-    providerIds: v.optional(v.array(v.string())),
+    modelsDevProviderIds: v.optional(v.array(v.string())),
     excludeFree: v.optional(v.boolean()),
     excludeDeprecated: v.optional(v.boolean()),
     distinctCanonical: v.optional(v.boolean()),
@@ -210,19 +222,19 @@ export const cheapest = query({
   },
   returns: v.object({ models: v.array(modelDoc), isComplete: v.boolean() }),
   handler: async (ctx, args) => {
-    finiteBounds(args.minContext, args.minOutput);
+    finiteBounds(args.minContextTokens, args.minOutputTokens);
     const limit = boundedLimit(args.limit, 5, 20);
     const excludeDeprecated = args.excludeDeprecated ?? true;
     const required = masks(args.inputModalities).reduce((acc, bit) => acc | bit, 0);
-    const providers = args.providerIds ? new Set(args.providerIds) : undefined;
+    const providers = args.modelsDevProviderIds ? new Set(args.modelsDevProviderIds) : undefined;
     const matches = (m: Doc<"models">) =>
-      (args.minContext === undefined || m.contextLimit >= args.minContext) &&
-      (args.minOutput === undefined || m.outputLimit >= args.minOutput) &&
+      (args.minContextTokens === undefined || m.context >= args.minContextTokens) &&
+      (args.minOutputTokens === undefined || m.output >= args.minOutputTokens) &&
       (args.reasoning === undefined || m.reasoning === args.reasoning) &&
       (args.toolCall === undefined || m.toolCall === args.toolCall) &&
       (args.structuredOutput === undefined || m.structuredOutput === args.structuredOutput) &&
       (required === 0 || (m.inputMask & required) === required) &&
-      (!providers || providers.has(m.providerId)) &&
+      (!providers || providers.has(m.modelsDevProviderId)) &&
       (!args.excludeFree || (m.costBlended ?? 0) > 0) &&
       (!excludeDeprecated || m.status !== "deprecated");
 
@@ -231,11 +243,11 @@ export const cheapest = query({
     let scanned = 0;
 
     const ordered = providers
-      ? [...providers].map((providerId) =>
+      ? [...providers].map((modelsDevProviderId) =>
           ctx.db
             .query("models")
-            .withIndex("by_providerId_and_costBlended", (q) =>
-              q.eq("providerId", providerId).gte("costBlended", 0),
+            .withIndex("by_modelsDevProviderId_and_costBlended", (q) =>
+              q.eq("modelsDevProviderId", modelsDevProviderId).gte("costBlended", 0),
             ),
         )
       : [ctx.db.query("models").withIndex("by_costBlended", (q) => q.gte("costBlended", 0))];
@@ -274,7 +286,9 @@ export const cheapest = query({
         const m = heads[selected];
         if (!m) break;
         if (matches(m)) {
-          const key = m.canonicalModelId ?? JSON.stringify([m.providerId, m.modelId]);
+          const key =
+            m.modelsDevCanonicalModelId ??
+            JSON.stringify([m.modelsDevProviderId, m.modelsDevModelId]);
           if (!args.distinctCanonical || !canonical.has(key)) {
             canonical.add(key);
             results.push(m);
@@ -289,40 +303,44 @@ export const cheapest = query({
   },
 });
 
-export const equivalents = query({
-  args: { canonicalModelId: v.string(), limit: v.optional(v.number()) },
+export const listEquivalents = query({
+  args: { modelsDevCanonicalModelId: v.string(), limit: v.optional(v.number()) },
   returns: v.array(modelDoc),
-  handler: async (ctx, { canonicalModelId, limit }) => {
+  handler: async (ctx, { modelsDevCanonicalModelId, limit }) => {
     return ctx.db
       .query("models")
-      .withIndex("by_canonicalModelId_and_hasCost_and_costOrder", (q) =>
-        q.eq("canonicalModelId", canonicalModelId),
+      .withIndex("by_modelsDevCanonicalModelId_and_hasCost_and_costOrder", (q) =>
+        q.eq("modelsDevCanonicalModelId", modelsDevCanonicalModelId),
       )
       .order("desc")
       .take(boundedLimit(limit, 200, 200));
   },
 });
 
-export const priceHistory = query({
-  args: { providerId: v.string(), modelId: v.string(), limit: v.optional(v.number()) },
+export const listPriceChanges = query({
+  args: {
+    modelsDevProviderId: v.string(),
+    modelsDevModelId: v.string(),
+    limit: v.optional(v.number()),
+  },
   returns: v.array(schema.doc("priceChanges")),
-  handler: (ctx, { providerId, modelId, limit }) =>
+  handler: (ctx, { modelsDevProviderId, modelsDevModelId, limit }) =>
     ctx.db
       .query("priceChanges")
-      .withIndex("by_providerId_and_modelId_and_at", (q) =>
-        q.eq("providerId", providerId).eq("modelId", modelId),
+      .withIndex("by_modelsDevProviderId_and_modelsDevModelId_and_changedAt", (q) =>
+        q.eq("modelsDevProviderId", modelsDevProviderId).eq("modelsDevModelId", modelsDevModelId),
       )
       .order("desc")
       .take(boundedLimit(limit, 50, 200)),
 });
 
-export const estimate = query({
+export const estimateCost = query({
   args: {
     provider: v.string(),
     model: v.string(),
     usage: usageValidator,
-    mode: v.optional(v.string()),
-    inputIncludesCache: v.optional(v.boolean()),
+    mode: v.union(v.string(), v.null()),
+    inputTokenScope: inputTokenScopeValidator,
     aliases: v.optional(v.record(v.string(), v.string())),
   },
   returns: costEstimateValidator,
@@ -330,11 +348,9 @@ export const estimate = query({
     validateUsage(args.usage);
     const row = await resolveRow(ctx, args.provider, args.model, args.aliases);
     if (!row) return { known: false as const };
-    return estimateCost(row, args.usage, {
-      ...(args.mode !== undefined && { mode: args.mode }),
-      ...(args.inputIncludesCache !== undefined && {
-        inputIncludesCache: args.inputIncludesCache,
-      }),
+    return estimateModelCost(row, args.usage, {
+      mode: args.mode,
+      inputTokenScope: args.inputTokenScope,
     });
   },
 });

@@ -269,7 +269,7 @@ async function journey() {
   await client.mutation(anyApi.example.configureSync, { minProviders: 1, minModels: 1 });
   let synced;
   await waitFor(async () => {
-    synced = await action("syncNow", { force: true });
+    synced = await action("syncForced", {});
     return synced.reason !== "already_running";
   });
   check(["ok", "not_modified"].includes(synced.status), "fixture sync failed");
@@ -282,17 +282,20 @@ async function journey() {
     "sync counts or lease differ",
   );
   check((await action("syncNow")).reason === "min_interval", "interval floor failed");
-  check(
-    (await action("syncNow", { force: true })).status === "not_modified",
-    "conditional fetch failed",
+  check((await action("syncForced", {})).status === "not_modified", "conditional fetch failed");
+  const first = await query("listModels", { paginationOpts: { cursor: null, numItems: 10 } });
+  const next = await query("listModels", {
+    paginationOpts: { cursor: first.continueCursor, numItems: 10 },
+  });
+  const keys = new Set(
+    first.page.map((row) => JSON.stringify([row.modelsDevProviderId, row.modelsDevModelId])),
   );
-  const first = await query("listModels", { cursor: null, numItems: 10 });
-  const next = await query("listModels", { cursor: first.continueCursor, numItems: 10 });
-  const keys = new Set(first.page.map((row) => JSON.stringify([row.providerId, row.modelId])));
   check(
     first.page.length === 10 &&
       next.page.length === 10 &&
-      next.page.every((row) => !keys.has(JSON.stringify([row.providerId, row.modelId]))),
+      next.page.every(
+        (row) => !keys.has(JSON.stringify([row.modelsDevProviderId, row.modelsDevModelId])),
+      ),
     "pagination overlapped",
   );
   check(
@@ -301,6 +304,8 @@ async function journey() {
   );
   check(
     (await query("costOfUsage", {
+      mode: null,
+      inputTokenScope: "includesCache",
       provider: "anthropic.messages",
       model: "claude-sonnet-4-5",
       rawUsage: { inputTokens: 1000, outputTokens: 500 },
@@ -309,6 +314,8 @@ async function journey() {
   );
   check(
     await query("costOfUsage", {
+      mode: null,
+      inputTokenScope: "includesCache",
       provider: "openai",
       model: "gpt-5.4",
       rawUsage: { inputTokens: 1e308 },
@@ -340,14 +347,14 @@ async function journey() {
   });
   check(bytes.page.length <= 1 && bytes.pageStatus === "SplitRequired", "byte budget ignored");
   check(
-    errorCode(() => component("config:configure", { sourceUrl: "http://example.com" })) ===
-      "MODELS_DEV_INVALID_SOURCE_URL",
+    errorCode(() => component("config:update", { sourceUrl: "http://example.com" })) ===
+      "MODELS_DEV_INVALID_ARGUMENT",
     "source error differs",
   );
   check(
     errorCode(() =>
-      component("config:configure", { sourceUrl: "https://example.com/" + "a".repeat(2048) }),
-    ) === "MODELS_DEV_INVALID_SOURCE_URL",
+      component("config:update", { sourceUrl: "https://example.com/" + "a".repeat(2048) }),
+    ) === "MODELS_DEV_INVALID_ARGUMENT",
     "oversized URL accepted",
   );
   const denied = await publicClient.query(anyApi.example.syncStatus, {}).then(
@@ -370,7 +377,7 @@ async function journey() {
   malformed.openai.models["gpt-5.4"].name = "x".repeat(499) + "😀";
   body = JSON.stringify(malformed);
   etag = '"fixture-2"';
-  check((await action("syncNow", { force: true })).status === "ok", "Unicode catalog rejected");
+  check((await action("syncForced", {})).status === "ok", "Unicode catalog rejected");
   check(
     (await query("getModel", { key: "openai/gpt-5.4" })).name.endsWith("😀"),
     "Unicode string changed",
@@ -378,7 +385,9 @@ async function journey() {
   for (const count of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1])
     check(
       errorCode(() =>
-        component("models:estimate", {
+        component("models:estimateCost", {
+          mode: null,
+          inputTokenScope: "includesCache",
           provider: "openai",
           model: "gpt-5.4",
           usage: { inputTokens: count },
@@ -387,7 +396,8 @@ async function journey() {
       "invalid token count accepted",
     );
   check(
-    component("models:estimate", {
+    component("models:estimateCost", {
+      inputTokenScope: "includesCache",
       provider: "openai",
       model: "gpt-5.4",
       usage: { inputTokens: 10 },
@@ -395,14 +405,14 @@ async function journey() {
     }).known === false,
     "unpriced mode accepted",
   );
-  const cheapest = component("models:cheapest", {
-    providerIds: ["openai", "anthropic"],
+  const cheapest = component("models:listCheapest", {
+    modelsDevProviderIds: ["openai", "anthropic"],
     limit: 20,
   });
   check(
     cheapest.isComplete &&
       cheapest.models.length > 0 &&
-      cheapest.models.every((row) => ["openai", "anthropic"].includes(row.providerId)),
+      cheapest.models.every((row) => ["openai", "anthropic"].includes(row.modelsDevProviderId)),
     "provider cost ranges differ",
   );
   const stored = await query("getModel", { key: "openai/gpt-5.4" });
@@ -410,7 +420,7 @@ async function journey() {
   oversized.openai.models["gpt-5.4"].family = "😀".repeat(257);
   body = JSON.stringify(oversized);
   etag = '"fixture-index-bound"';
-  const skipped = await action("syncNow", { force: true });
+  const skipped = await action("syncForced", {});
   check(
     skipped.status === "ok" &&
       skipped.skippedModels === 1 &&
@@ -422,14 +432,14 @@ async function journey() {
   body = JSON.stringify(provider);
   etag = '"fixture-invalid-provider"';
   check(
-    (await action("syncNow", { force: true })).status === "ok" &&
+    (await action("syncForced", {})).status === "ok" &&
       JSON.stringify(await query("getModel", { key: "openai/gpt-5.4" })) === JSON.stringify(stored),
     "malformed provider blocked sync or removed stored row",
   );
   const savedBody = body;
   body = body.padEnd(16 * 1024 * 1024 + 1, " ");
   etag = '"fixture-large"';
-  const tooLarge = await action("syncNow", { force: true });
+  const tooLarge = await action("syncForced", {});
   check(
     tooLarge.status === "error" &&
       tooLarge.errors.length === 2 &&
@@ -438,12 +448,12 @@ async function journey() {
   );
   body = savedBody;
   fail = true;
-  const failed = await action("syncNow", { force: true });
+  const failed = await action("syncForced", {});
   check(
     failed.status === "error" &&
-      failed.error.code === "MODELS_DEV_FETCH_FAILED" &&
-      failed.error.providerStatus === 503 &&
-      failed.error.message === "The catalog request failed." &&
+      failed.errors[0].code === "MODELS_DEV_PROVIDER_ERROR" &&
+      failed.errors[0].providerStatus === 503 &&
+      failed.errors[0].message === "The catalog provider returned a failure response." &&
       failed.errors.length === 2 &&
       failed.errors[0].source === "primary" &&
       failed.errors[1].source === "fallback",

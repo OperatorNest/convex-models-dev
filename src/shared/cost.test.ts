@@ -1,11 +1,13 @@
-import { describe, expect, test } from "vitest";
+import { expect, test, describe } from "vitest";
+
 import { fixtureModel } from "../fixtures/index.js";
-import { estimateCost, usageFromAgent, type CostModel } from "./cost.js";
+
+import { estimateCost, extractUsage, type CostModel } from "./cost.js";
 
 function known(
   model: CostModel,
   usage: Parameters<typeof estimateCost>[1],
-  opts?: Parameters<typeof estimateCost>[2],
+  opts: Parameters<typeof estimateCost>[2] = { mode: null, inputTokenScope: "includesCache" },
 ) {
   const estimate = estimateCost(model, usage, opts);
   if (!estimate.known) throw new Error("expected a known estimate");
@@ -16,7 +18,7 @@ const sonnet = fixtureModel("anthropic", "claude-sonnet-4-5");
 const gemini = fixtureModel("google", "gemini-2.5-pro");
 const gpt54 = fixtureModel("openai", "gpt-5.4");
 
-describe("estimateCost matrix (spec 6.4)", () => {
+describe("token cost estimation", () => {
   test("no cache", () => {
     const e = known(sonnet, { inputTokens: 1000, outputTokens: 500 });
     expect(e.nanoUsd).toBe(3_000_000 + 7_500_000);
@@ -45,11 +47,11 @@ describe("estimateCost matrix (spec 6.4)", () => {
     expect(e.nanoUsd).toBe(6_000_000 + 1_800_000 + 7_500_000 + 15_000_000);
   });
 
-  test("raw anthropic usage with inputIncludesCache false", () => {
+  test("reported input excluding cache adds cache counts before pricing", () => {
     const e = known(
       sonnet,
       { inputTokens: 2000, outputTokens: 1000, cacheReadTokens: 6000, cacheWriteTokens: 2000 },
-      { inputIncludesCache: false },
+      { mode: null, inputTokenScope: "excludesCache" },
     );
     expect(e.nanoUsd).toBe(6_000_000 + 1_800_000 + 7_500_000 + 15_000_000);
   });
@@ -95,13 +97,21 @@ describe("estimateCost matrix (spec 6.4)", () => {
   });
 
   test("gpt-5.4 mode fast overrides the base table", () => {
-    const e = known(gpt54, { inputTokens: 1000, outputTokens: 1000 }, { mode: "fast" });
+    const e = known(
+      gpt54,
+      { inputTokens: 1000, outputTokens: 1000 },
+      { inputTokenScope: "includesCache", mode: "fast" },
+    );
     expect(e.mode).toBe("fast");
     expect(e.nanoUsd).toBe(1000 * 5000 + 1000 * 30_000);
   });
 
   test("mode above a base tier: per-field max of mode and base tier, with an assumption", () => {
-    const e = known(gpt54, { inputTokens: 272_001, outputTokens: 1000 }, { mode: "fast" });
+    const e = known(
+      gpt54,
+      { inputTokens: 272_001, outputTokens: 1000 },
+      { inputTokenScope: "includesCache", mode: "fast" },
+    );
     expect(e.mode).toBe("fast");
     expect(e.tier).toBe(272_000);
 
@@ -116,11 +126,19 @@ describe("estimateCost matrix (spec 6.4)", () => {
       tiers: [{ size: 100, input: 4, output: 8 }],
       modes: { fast: { cost: { input: 3, output: 5 } } },
     };
-    const e = known(m, { inputTokens: 1000, outputTokens: 1000 }, { mode: "fast" });
-    expect(e.nanoUsd).toBe(1000 * 4000 + 1000 * 8000);
-    expect(known(m, { inputTokens: 50, outputTokens: 0 }, { mode: "fast" }).assumptions).toEqual(
-      [],
+    const e = known(
+      m,
+      { inputTokens: 1000, outputTokens: 1000 },
+      { inputTokenScope: "includesCache", mode: "fast" },
     );
+    expect(e.nanoUsd).toBe(1000 * 4000 + 1000 * 8000);
+    expect(
+      known(
+        m,
+        { inputTokens: 50, outputTokens: 0 },
+        { inputTokenScope: "includesCache", mode: "fast" },
+      ).assumptions,
+    ).toEqual([]);
   });
 
   test("mode-defined tiers are used instead of base tiers", () => {
@@ -130,16 +148,30 @@ describe("estimateCost matrix (spec 6.4)", () => {
       tiers: [{ size: 100, input: 40, output: 80 }],
       modes: { fast: { cost: { input: 3, output: 5 }, tiers: [{ size: 100, input: 6 }] } },
     };
-    const e = known(m, { inputTokens: 1000, outputTokens: 1000 }, { mode: "fast" });
+    const e = known(
+      m,
+      { inputTokens: 1000, outputTokens: 1000 },
+      { inputTokenScope: "includesCache", mode: "fast" },
+    );
     expect(e.nanoUsd).toBe(1000 * 6000 + 1000 * 5000);
     expect(e.assumptions).toEqual([]);
     expect(e.tier).toBe(100);
   });
 
   test("unpriced requested modes return unknown", () => {
-    expect(estimateCost(gpt54, { inputTokens: 1000 }, { mode: "nope" })).toEqual({ known: false });
     expect(
-      estimateCost(fixtureModel("openai", "gpt-5.6"), { inputTokens: 1000 }, { mode: "pro" }),
+      estimateCost(
+        gpt54,
+        { inputTokens: 1000 },
+        { inputTokenScope: "includesCache", mode: "nope" },
+      ),
+    ).toEqual({ known: false });
+    expect(
+      estimateCost(
+        fixtureModel("openai", "gpt-5.6"),
+        { inputTokens: 1000 },
+        { inputTokenScope: "includesCache", mode: "pro" },
+      ),
     ).toEqual({ known: false });
   });
 
@@ -178,12 +210,32 @@ describe("estimateCost matrix (spec 6.4)", () => {
   });
 
   test("missing cost is unknown, never zero", () => {
-    expect(estimateCost(fixtureModel("openai", "gpt-image-1-mini"), { inputTokens: 5 })).toEqual({
+    expect(
+      estimateCost(
+        fixtureModel("openai", "gpt-image-1-mini"),
+        { inputTokens: 5 },
+        { mode: null, inputTokenScope: "includesCache" },
+      ),
+    ).toEqual({
       known: false,
     });
-    expect(estimateCost({}, { inputTokens: 5 })).toEqual({ known: false });
-    expect(estimateCost({ costInput: 1 }, { inputTokens: 5 })).toEqual({ known: false });
-    expect(estimateCost({ costInput: -1, costOutput: 1 }, { inputTokens: 5 })).toEqual({
+    expect(
+      estimateCost({}, { inputTokens: 5 }, { mode: null, inputTokenScope: "includesCache" }),
+    ).toEqual({ known: false });
+    expect(
+      estimateCost(
+        { costInput: 1 },
+        { inputTokens: 5 },
+        { mode: null, inputTokenScope: "includesCache" },
+      ),
+    ).toEqual({ known: false });
+    expect(
+      estimateCost(
+        { costInput: -1, costOutput: 1 },
+        { inputTokens: 5 },
+        { mode: null, inputTokenScope: "includesCache" },
+      ),
+    ).toEqual({
       known: false,
     });
   });
@@ -255,7 +307,13 @@ describe("usage normalization", () => {
 
   test("invalid token counts throw a fixed argument error", () => {
     for (const count of [-5, NaN, Infinity, -Infinity, 10.9, Number.MAX_SAFE_INTEGER + 1]) {
-      expect(() => estimateCost(model, { inputTokens: count })).toThrow();
+      expect(() =>
+        estimateCost(
+          model,
+          { inputTokens: count },
+          { mode: null, inputTokenScope: "includesCache" },
+        ),
+      ).toThrow();
     }
   });
 
@@ -278,10 +336,10 @@ describe("usage normalization", () => {
   });
 });
 
-describe("usageFromAgent", () => {
+describe("extractUsage", () => {
   test("AI SDK 5/6 spelling", () => {
     expect(
-      usageFromAgent({
+      extractUsage({
         usage: {
           inputTokens: 100,
           outputTokens: 50,
@@ -295,7 +353,7 @@ describe("usageFromAgent", () => {
 
   test("AI SDK 7 detail objects", () => {
     expect(
-      usageFromAgent({
+      extractUsage({
         usage: {
           inputTokens: 100,
           outputTokens: 50,
@@ -316,7 +374,7 @@ describe("usageFromAgent", () => {
 
   test("provider metadata only fills missing cache fields", () => {
     expect(
-      usageFromAgent({
+      extractUsage({
         usage: { inputTokens: 100, outputTokens: 5 },
         providerMetadata: {
           anthropic: { cacheCreationInputTokens: 40 },
@@ -325,7 +383,7 @@ describe("usageFromAgent", () => {
       }),
     ).toEqual({ inputTokens: 100, outputTokens: 5, cacheReadTokens: 12, cacheWriteTokens: 40 });
     expect(
-      usageFromAgent({
+      extractUsage({
         usage: { inputTokens: 100, cachedInputTokens: 7 },
         providerMetadata: { openai: { cachedPromptTokens: 12 } },
       }).cacheReadTokens,
@@ -334,15 +392,29 @@ describe("usageFromAgent", () => {
 
   test("maps the cacheWriteInputTokens and nonCachedInputTokens spellings", () => {
     expect(
-      usageFromAgent({
+      extractUsage({
         usage: { inputTokens: 100, cacheWriteInputTokens: 30, nonCachedInputTokens: 50 },
       }),
     ).toEqual({ inputTokens: 100, cacheWriteTokens: 30, noCacheTokens: 50 });
   });
 
   test("tolerates garbage", () => {
-    expect(usageFromAgent({})).toEqual({});
-    expect(usageFromAgent({ usage: "x", providerMetadata: 3 })).toEqual({});
-    expect(usageFromAgent({ usage: { inputTokens: "5" } })).toEqual({});
+    expect(extractUsage({})).toEqual({});
+    expect(extractUsage({ usage: "x", providerMetadata: 3 })).toEqual({});
+    expect(extractUsage({ usage: { inputTokens: "5" } })).toEqual({});
   });
+});
+
+test("cost estimates reject unsafe terms and totals", () => {
+  const model = { costInput: 1, costOutput: 1 };
+  expect(() =>
+    estimateCost(model, { inputTokens: 1e308 }, { mode: null, inputTokenScope: "includesCache" }),
+  ).toThrow();
+  expect(
+    estimateCost(
+      model,
+      { inputTokens: 5e12, outputTokens: 5e12 },
+      { mode: null, inputTokenScope: "includesCache" },
+    ),
+  ).toEqual({ known: false });
 });

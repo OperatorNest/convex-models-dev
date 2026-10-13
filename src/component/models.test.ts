@@ -1,46 +1,59 @@
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { listCheapest } from "./models.js";
+import { afterEach, expect, test, vi, describe } from "vitest";
+import { api, internal } from "./_generated/api.js";
+import { catalogServer, componentTest, relaxGuards, requireValue } from "../test-helpers.js";
 import {
   fixtureJson,
   fixtureModel,
+  fixtureCatalog,
+  rawModel,
   modelsOf,
   providerOf,
-  rawModel,
   type RawModel,
   FIXTURE_MODEL_COUNT,
   FIXTURE_PROVIDER_COUNT,
   type Catalog,
 } from "../fixtures/index.js";
-import { catalogServer, componentTest, relaxGuards } from "../test-helpers.js";
-import { api } from "./_generated/api.js";
+import { normalizeModel } from "../shared/normalize.js";
+import { estimateCost } from "../shared/cost.js";
 
 async function syncedCatalog(mutate?: (c: Catalog) => void) {
   const t = componentTest();
   await relaxGuards(t);
   catalogServer({ body: fixtureJson(mutate) });
-  await t.action(api.sync.syncNow, { force: true });
+  await t.action(api.sync.runForced, {});
   return t;
 }
 
 const page = { numItems: 100, cursor: null };
-const ids = (rows: { providerId: string; modelId: string }[]) =>
-  rows.map((m) => `${m.providerId}/${m.modelId}`);
+const ids = (rows: { modelsDevProviderId: string; modelsDevModelId: string }[]) =>
+  rows.map((m) => `${m.modelsDevProviderId}/${m.modelsDevModelId}`);
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("get, getByKey, resolve", () => {
   test("get returns the exact provider/model pair", async () => {
     const t = await syncedCatalog();
-    const row = await t.query(api.models.get, { providerId: "azure", modelId: "gpt-5.4" });
-    expect(row).toMatchObject({ providerId: "azure", modelId: "gpt-5.4", hasCost: true });
-    expect(await t.query(api.models.get, { providerId: "azure", modelId: "nope" })).toBeNull();
+    const row = await t.query(api.models.get, {
+      modelsDevProviderId: "azure",
+      modelsDevModelId: "gpt-5.4",
+    });
+    expect(row).toMatchObject({
+      modelsDevProviderId: "azure",
+      modelsDevModelId: "gpt-5.4",
+      hasCost: true,
+    });
+    expect(
+      await t.query(api.models.get, { modelsDevProviderId: "azure", modelsDevModelId: "nope" }),
+    ).toBeNull();
   });
 
   test("getByKey accepts provider/model and provider:model", async () => {
     const t = await syncedCatalog();
     for (const key of ["openai/gpt-5.4", "openai:gpt-5.4"]) {
       expect(await t.query(api.models.getByKey, { key })).toMatchObject({
-        providerId: "openai",
-        modelId: "gpt-5.4",
+        modelsDevProviderId: "openai",
+        modelsDevModelId: "gpt-5.4",
       });
     }
     expect(await t.query(api.models.getByKey, { key: "nobody/gpt-5.4" })).toBeNull();
@@ -57,8 +70,8 @@ describe("get, getByKey, resolve", () => {
       c[deep] = { ...base, id: deep, models: { m: rawModel(c, "azure", "gpt-4o") } };
     });
     expect(await t.query(api.models.getByKey, { key: "p/q/m" })).toMatchObject({
-      providerId: "p/q",
-      modelId: "m",
+      modelsDevProviderId: "p/q",
+      modelsDevModelId: "m",
     });
     expect(await t.query(api.models.getByKey, { key: "a/b/c/d/e/f/g/h/i/j/m" })).toBeNull();
     expect(await t.query(api.models.getByKey, { key: "/m" })).toBeNull();
@@ -69,8 +82,8 @@ describe("get, getByKey, resolve", () => {
       modelsOf(c, "azure")["org/odd:id"] = { ...rawModel(c, "azure", "gpt-4o"), id: "org/odd:id" };
     });
     expect(await t.query(api.models.getByKey, { key: "azure/org/odd:id" })).toMatchObject({
-      providerId: "azure",
-      modelId: "org/odd:id",
+      modelsDevProviderId: "azure",
+      modelsDevModelId: "org/odd:id",
     });
   });
 
@@ -78,7 +91,7 @@ describe("get, getByKey, resolve", () => {
     const t = await syncedCatalog();
     const hit = async (provider: string, model: string, aliases?: Record<string, string>) =>
       (await t.query(api.models.resolve, { provider, model, ...(aliases && { aliases }) }))
-        ?.providerId ?? null;
+        ?.modelsDevProviderId ?? null;
     expect(await hit("openai.responses", "gpt-5.4")).toBe("openai");
     expect(await hit("google.generative-ai", "gemini-2.5-pro")).toBe("google");
     expect(await hit("azure.chat", "gpt-5.4")).toBe("azure");
@@ -92,7 +105,7 @@ describe("providers", () => {
   test("list and get", async () => {
     const t = await syncedCatalog();
     const providers = await t.query(api.providers.list, {});
-    expect(providers.map((p) => p.providerId).toSorted()).toEqual([
+    expect(providers.map((p) => p.modelsDevProviderId).toSorted()).toEqual([
       "anthropic",
       "azure",
       "deepseek",
@@ -100,9 +113,9 @@ describe("providers", () => {
       "openai",
     ]);
     expect(providers).toHaveLength(FIXTURE_PROVIDER_COUNT);
-    const anthropic = await t.query(api.providers.get, { providerId: "anthropic" });
+    const anthropic = await t.query(api.providers.get, { modelsDevProviderId: "anthropic" });
     expect(anthropic).toMatchObject({ name: "Anthropic", npm: "@ai-sdk/anthropic", modelCount: 4 });
-    expect(await t.query(api.providers.get, { providerId: "nope" })).toBeNull();
+    expect(await t.query(api.providers.get, { modelsDevProviderId: "nope" })).toBeNull();
   });
 });
 
@@ -132,12 +145,14 @@ describe("list", () => {
     const t = await syncedCatalog();
     const list = async (args: Record<string, unknown>) =>
       ids((await t.query(api.models.list, { ...args, paginationOpts: page })).page);
-    expect((await list({ providerId: "anthropic" })).every((k) => k.startsWith("anthropic/"))).toBe(
-      true,
-    );
+    expect(
+      (await list({ modelsDevProviderId: "anthropic" })).every((k) => k.startsWith("anthropic/")),
+    ).toBe(true);
     expect(await list({ family: "gemini-flash" })).toHaveLength(2);
-    expect(await list({ providerId: "openai", reasoning: true })).toContain("openai/gpt-5.4");
-    expect(await list({ providerId: "openai", toolCall: false })).toContain(
+    expect(await list({ modelsDevProviderId: "openai", reasoning: true })).toContain(
+      "openai/gpt-5.4",
+    );
+    expect(await list({ modelsDevProviderId: "openai", toolCall: false })).toContain(
       "openai/gpt-image-1-mini",
     );
     expect((await list({ inputModalities: ["audio"] })).toSorted()).toEqual([
@@ -145,13 +160,13 @@ describe("list", () => {
       "google/gemini-2.5-pro",
       "google/gemini-3.5-flash",
     ]);
-    expect(await list({ inputModalities: ["audio", "video"], providerId: "google" })).toHaveLength(
-      3,
-    );
+    expect(
+      await list({ inputModalities: ["audio", "video"], modelsDevProviderId: "google" }),
+    ).toHaveLength(3);
     expect(await list({ outputModalities: ["audio"] })).toEqual(["google/lyria-3-pro-preview"]);
     expect(await list({ outputModalities: ["video"] })).toEqual([]);
     expect(
-      (await list({ minContext: 1_000_000 })).every((k) => !k.endsWith("claude-opus-4-5")),
+      (await list({ minContextTokens: 1_000_000 })).every((k) => !k.endsWith("claude-opus-4-5")),
     ).toBe(true);
     expect(await list({ maxCostInput: 0.3 })).toEqual(
       expect.arrayContaining([
@@ -161,19 +176,19 @@ describe("list", () => {
       ]),
     );
     expect(await list({ maxCostInput: 0.3 })).not.toContain("openai/gpt-image-1-mini");
-    expect(await list({ providerId: "azure", openWeights: true })).toEqual([]);
+    expect(await list({ modelsDevProviderId: "azure", openWeights: true })).toEqual([]);
   });
 
   test("order by context and by cost", async () => {
     const t = await syncedCatalog();
     const byContext = await t.query(api.models.list, { order: "context", paginationOpts: page });
-    const contexts = byContext.page.map((m) => m.contextLimit);
+    const contexts = byContext.page.map((m) => m.context);
     expect(contexts).toEqual([...contexts].toSorted((a, b) => b - a));
     const byCost = await t.query(api.models.list, { order: "cost", paginationOpts: page });
     const costs = byCost.page.map((m) => m.costBlended);
     expect(costs.every((c) => c !== undefined)).toBe(true);
     expect(costs).toEqual([...costs].toSorted((a, b) => (a ?? 0) - (b ?? 0)));
-    expect(byCost.page.some((m) => m.modelId === "gpt-image-1-mini")).toBe(false);
+    expect(byCost.page.some((m) => m.modelsDevModelId === "gpt-image-1-mini")).toBe(false);
   });
 
   test("paginates", async () => {
@@ -203,9 +218,9 @@ describe("search", () => {
     const gem = await t.query(api.models.search, { query: "Gemini" });
     expect(ids(gem).every((k) => k.includes("gemini"))).toBe(true);
     expect(gem.length).toBeGreaterThanOrEqual(3);
-    expect(ids(await t.query(api.models.search, { query: "sonnet", providerId: "azure" }))).toEqual(
-      ["azure/claude-sonnet-4-5"],
-    );
+    expect(
+      ids(await t.query(api.models.search, { query: "sonnet", modelsDevProviderId: "azure" })),
+    ).toEqual(["azure/claude-sonnet-4-5"]);
     expect(
       ids(await t.query(api.models.search, { query: "gemini", family: "gemini-pro" })),
     ).toEqual(["google/gemini-2.5-pro"]);
@@ -221,7 +236,7 @@ describe("search", () => {
 describe("cheapest", () => {
   test("ranks by blended cost, never returns models without cost", async () => {
     const t = await syncedCatalog();
-    const { models: rows } = await t.query(api.models.cheapest, {
+    const { models: rows } = await t.query(api.models.listCheapest, {
       limit: 20,
       excludeDeprecated: false,
     });
@@ -233,20 +248,23 @@ describe("cheapest", () => {
 
   test("applies capability filters and the free/deprecated switches", async () => {
     const t = await syncedCatalog();
-    const { models: defaults } = await t.query(api.models.cheapest, { toolCall: true });
+    const { models: defaults } = await t.query(api.models.listCheapest, { toolCall: true });
     expect(defaults.map((m) => m.status)).not.toContain("deprecated");
     expect(defaults.every((m) => m.toolCall)).toBe(true);
-    const { models: free } = await t.query(api.models.cheapest, { limit: 1 });
-    expect(free[0]).toMatchObject({ modelId: "lyria-3-pro-preview", costBlended: 0 });
-    const { models: paid } = await t.query(api.models.cheapest, { excludeFree: true, limit: 1 });
+    const { models: free } = await t.query(api.models.listCheapest, { limit: 1 });
+    expect(free[0]).toMatchObject({ modelsDevModelId: "lyria-3-pro-preview", costBlended: 0 });
+    const { models: paid } = await t.query(api.models.listCheapest, {
+      excludeFree: true,
+      limit: 1,
+    });
     expect(paid[0]?.costBlended).toBeGreaterThan(0);
-    const { models: ctx } = await t.query(api.models.cheapest, {
-      minContext: 1_000_000,
+    const { models: ctx } = await t.query(api.models.listCheapest, {
+      minContextTokens: 1_000_000,
       excludeFree: true,
       limit: 3,
     });
-    expect(ctx.every((m) => m.contextLimit >= 1_000_000)).toBe(true);
-    const { models: audio } = await t.query(api.models.cheapest, {
+    expect(ctx.every((m) => m.context >= 1_000_000)).toBe(true);
+    const { models: audio } = await t.query(api.models.listCheapest, {
       inputModalities: ["audio"],
       limit: 20,
     });
@@ -255,29 +273,29 @@ describe("cheapest", () => {
       "google/gemini-2.5-pro",
       "google/gemini-3.5-flash",
     ]);
-    const { models: scoped } = await t.query(api.models.cheapest, {
-      providerIds: ["anthropic"],
+    const { models: scoped } = await t.query(api.models.listCheapest, {
+      modelsDevProviderIds: ["anthropic"],
       limit: 20,
     });
-    expect(scoped.every((m) => m.providerId === "anthropic")).toBe(true);
-    expect(scoped[0]?.modelId).toBe("claude-haiku-4-5");
+    expect(scoped.every((m) => m.modelsDevProviderId === "anthropic")).toBe(true);
+    expect(scoped[0]?.modelsDevModelId).toBe("claude-haiku-4-5");
   });
 
   test("distinctCanonical collapses gateways serving the same model", async () => {
     const t = await syncedCatalog((c) => {
       rawModel(c, "openai", "gpt-5.4").canonical_model_id = "openai/gpt-5.4";
     });
-    const { models: plain } = await t.query(api.models.cheapest, {
-      providerIds: ["openai", "azure"],
+    const { models: plain } = await t.query(api.models.listCheapest, {
+      modelsDevProviderIds: ["openai", "azure"],
       limit: 20,
     });
-    expect(plain.filter((m) => m.modelId === "gpt-5.4")).toHaveLength(2);
-    const { models: distinct } = await t.query(api.models.cheapest, {
-      providerIds: ["openai", "azure"],
+    expect(plain.filter((m) => m.modelsDevModelId === "gpt-5.4")).toHaveLength(2);
+    const { models: distinct } = await t.query(api.models.listCheapest, {
+      modelsDevProviderIds: ["openai", "azure"],
       limit: 20,
       distinctCanonical: true,
     });
-    expect(distinct.filter((m) => m.modelId === "gpt-5.4")).toHaveLength(1);
+    expect(distinct.filter((m) => m.modelsDevModelId === "gpt-5.4")).toHaveLength(1);
   });
 });
 
@@ -299,14 +317,14 @@ describe("cheapest over large ties", () => {
         providerOf(c, "openai").models = big;
       }),
     });
-    await t.action(api.sync.syncNow, { force: true });
-    const { models: rows } = await t.query(api.models.cheapest, {
-      minContext: 2_000_000,
+    await t.action(api.sync.runForced, {});
+    const { models: rows } = await t.query(api.models.listCheapest, {
+      minContextTokens: 2_000_000,
       limit: 20,
       excludeDeprecated: false,
     });
     expect(rows).toHaveLength(20);
-    expect(rows.every((m) => m.contextLimit === 2_000_000)).toBe(true);
+    expect(rows.every((m) => m.context === 2_000_000)).toBe(true);
   });
 });
 
@@ -314,28 +332,28 @@ describe("list keeps the requested order under filters", () => {
   test("provider plus cost order is cheapest first", async () => {
     const t = await syncedCatalog();
     const res = await t.query(api.models.list, {
-      providerId: "google",
+      modelsDevProviderId: "google",
       order: "cost",
       includeDeprecated: true,
       paginationOpts: page,
     });
     const costs = res.page.map((m) => m.costBlended ?? -1);
     expect(res.page.length).toBeGreaterThan(1);
-    expect(res.page.every((m) => m.providerId === "google" && m.hasCost)).toBe(true);
+    expect(res.page.every((m) => m.modelsDevProviderId === "google" && m.hasCost)).toBe(true);
     expect(costs).toEqual(costs.toSorted((a, b) => a - b));
   });
 
   test("provider plus context order is largest first", async () => {
     const t = await syncedCatalog();
     const res = await t.query(api.models.list, {
-      providerId: "azure",
+      modelsDevProviderId: "azure",
       order: "context",
       includeDeprecated: true,
       paginationOpts: page,
     });
-    const ctxs = res.page.map((m) => m.contextLimit);
+    const ctxs = res.page.map((m) => m.context);
     expect(ctxs).toEqual(ctxs.toSorted((a, b) => b - a));
-    expect(res.page.every((m) => m.providerId === "azure")).toBe(true);
+    expect(res.page.every((m) => m.modelsDevProviderId === "azure")).toBe(true);
   });
 
   test("family plus cost order is cheapest first", async () => {
@@ -350,28 +368,28 @@ describe("list keeps the requested order under filters", () => {
     expect(costs).toEqual(costs.toSorted((a, b) => a - b));
   });
 
-  test("minContext plus release order stays newest first", async () => {
+  test("minContextTokens plus release order stays newest first", async () => {
     const t = await syncedCatalog();
     const res = await t.query(api.models.list, {
-      minContext: 1_000_000,
+      minContextTokens: 1_000_000,
       includeDeprecated: true,
       paginationOpts: page,
     });
     expect(res.page.length).toBeGreaterThan(1);
-    expect(res.page.every((m) => m.contextLimit >= 1_000_000)).toBe(true);
+    expect(res.page.every((m) => m.context >= 1_000_000)).toBe(true);
     const dates = res.page.map((m) => m.releaseDate);
     expect(dates).toEqual(dates.toSorted().toReversed());
   });
 
-  test("minContext plus context order respects the floor and order", async () => {
+  test("minContextTokens plus context order respects the floor and order", async () => {
     const t = await syncedCatalog();
     const res = await t.query(api.models.list, {
-      minContext: 1_000_000,
+      minContextTokens: 1_000_000,
       order: "context",
-      providerId: "openai",
+      modelsDevProviderId: "openai",
       paginationOpts: page,
     });
-    const ctxs = res.page.map((m) => m.contextLimit);
+    const ctxs = res.page.map((m) => m.context);
     expect(res.page.length).toBeGreaterThan(0);
     expect(ctxs.every((c) => c >= 1_000_000)).toBe(true);
     expect(ctxs).toEqual(ctxs.toSorted((a, b) => b - a));
@@ -384,39 +402,48 @@ describe("equivalents and priceHistory", () => {
       rawModel(c, "openai", "gpt-5.4").canonical_model_id = "openai/gpt-5.4";
       Object.assign(rawModel(c, "azure", "gpt-5.4").cost ?? {}, { input: 2 });
     });
-    const rows = await t.query(api.models.equivalents, { canonicalModelId: "openai/gpt-5.4" });
+    const rows = await t.query(api.models.listEquivalents, {
+      modelsDevCanonicalModelId: "openai/gpt-5.4",
+    });
     expect(ids(rows)).toEqual(["azure/gpt-5.4", "openai/gpt-5.4"]);
-    expect(await t.query(api.models.equivalents, { canonicalModelId: "nope/none" })).toEqual([]);
+    expect(
+      await t.query(api.models.listEquivalents, { modelsDevCanonicalModelId: "nope/none" }),
+    ).toEqual([]);
   });
 
   test("priceHistory is empty for unchanged models and newest first otherwise", async () => {
     const t = await syncedCatalog();
     expect(
-      await t.query(api.models.priceHistory, { providerId: "openai", modelId: "gpt-5.4" }),
+      await t.query(api.models.listPriceChanges, {
+        modelsDevProviderId: "openai",
+        modelsDevModelId: "gpt-5.4",
+      }),
     ).toEqual([]);
     await t.run(async (ctx) => {
-      for (const at of [1, 3, 2]) {
+      for (const changedAt of [1, 3, 2]) {
         await ctx.db.insert("priceChanges", {
-          providerId: "openai",
-          modelId: "gpt-5.4",
-          at,
+          modelsDevProviderId: "openai",
+          modelsDevModelId: "gpt-5.4",
+          changedAt,
           kind: "price",
         });
       }
     });
-    const history = await t.query(api.models.priceHistory, {
-      providerId: "openai",
-      modelId: "gpt-5.4",
+    const history = await t.query(api.models.listPriceChanges, {
+      modelsDevProviderId: "openai",
+      modelsDevModelId: "gpt-5.4",
       limit: 2,
     });
-    expect(history.map((h) => h.at)).toEqual([3, 2]);
+    expect(history.map((h) => h.changedAt)).toEqual([3, 2]);
   });
 });
 
 describe("estimate", () => {
   test("resolves the provider string and prices usage from the stored row", async () => {
     const t = await syncedCatalog();
-    const e = await t.query(api.models.estimate, {
+    const e = await t.query(api.models.estimateCost, {
+      mode: null,
+      inputTokenScope: "includesCache",
       provider: "anthropic.messages",
       model: "claude-sonnet-4-5",
       usage: { inputTokens: 1000, outputTokens: 500 },
@@ -427,24 +454,28 @@ describe("estimate", () => {
 
   test("applies tiers, modes and the cache semantics flag", async () => {
     const t = await syncedCatalog();
-    const tiered = await t.query(api.models.estimate, {
+    const tiered = await t.query(api.models.estimateCost, {
+      mode: null,
+      inputTokenScope: "includesCache",
       provider: "openai",
       model: "gpt-5.4",
       usage: { inputTokens: 272_001 },
     });
     expect(tiered).toMatchObject({ known: true, tier: 272_000 });
-    const fast = await t.query(api.models.estimate, {
+    const fast = await t.query(api.models.estimateCost, {
+      inputTokenScope: "includesCache",
       provider: "openai",
       model: "gpt-5.4",
       usage: { inputTokens: 1000, outputTokens: 1000 },
       mode: "fast",
     });
     expect(fast).toMatchObject({ known: true, nanoUsd: 35_000_000, mode: "fast" });
-    const raw = await t.query(api.models.estimate, {
+    const raw = await t.query(api.models.estimateCost, {
+      mode: null,
       provider: "anthropic",
       model: "claude-sonnet-4-5",
       usage: { inputTokens: 2000, cacheReadTokens: 6000, cacheWriteTokens: 2000 },
-      inputIncludesCache: false,
+      inputTokenScope: "excludesCache",
     });
     expect(raw).toMatchObject({ known: true, nanoUsd: 6_000_000 + 1_800_000 + 7_500_000 });
   });
@@ -452,14 +483,18 @@ describe("estimate", () => {
   test("unknown model or missing price is unknown, not zero", async () => {
     const t = await syncedCatalog();
     expect(
-      await t.query(api.models.estimate, {
+      await t.query(api.models.estimateCost, {
+        mode: null,
+        inputTokenScope: "includesCache",
         provider: "openai",
         model: "nope",
         usage: { inputTokens: 1 },
       }),
     ).toEqual({ known: false });
     expect(
-      await t.query(api.models.estimate, {
+      await t.query(api.models.estimateCost, {
+        mode: null,
+        inputTokenScope: "includesCache",
         provider: "openai",
         model: "gpt-image-1-mini",
         usage: { inputTokens: 1 },
@@ -480,7 +515,7 @@ describe("list pagination bounds", () => {
     await t.run((ctx) =>
       ctx.db.insert("models", {
         ...fixtureModel("openai", "gpt-5.4"),
-        modelId: "newest",
+        modelsDevModelId: "newest",
         releaseDate: "2099-01-01",
         contentHash: "h",
         firstSeenAt: 0,
@@ -500,7 +535,12 @@ describe("list pagination bounds", () => {
 
   test("maximumRowsRead is clamped, and batches never read past the allowance", async () => {
     const t = await syncedCatalog();
-    const none = { reasoning: true, toolCall: false, openWeights: true, providerId: "azure" };
+    const none = {
+      reasoning: true,
+      toolCall: false,
+      openWeights: true,
+      modelsDevProviderId: "azure",
+    };
     const small = await t.query(api.models.list, {
       ...none,
       paginationOpts: { numItems: 10, cursor: null, maximumRowsRead: 2 },
@@ -521,7 +561,7 @@ describe("list pagination bounds", () => {
       for (let i = 0; i < 102; i++) {
         await ctx.db.insert("models", {
           ...base,
-          modelId: `m-${i}`,
+          modelsDevModelId: `m-${i}`,
           releaseDate: `2020-01-${String(i).padStart(5, "0")}`,
           contentHash: "h",
           firstSeenAt: 0,
@@ -544,3 +584,350 @@ describe("list pagination bounds", () => {
     expect(second.isDone).toBe(true);
   }, 60_000);
 });
+
+const sync = (t: ReturnType<typeof componentTest>, force = true) =>
+  t.action(force ? api.sync.runForced : api.sync.run, {});
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
+
+test("disabled ticks and changed retention preserve history", async () => {
+  const t = componentTest();
+  await relaxGuards(t);
+  catalogServer({ body: fixtureJson() });
+  const changedAt = Date.now() - 40 * 86400000;
+  await t.run((ctx) =>
+    ctx.db.insert("priceChanges", {
+      modelsDevProviderId: "p",
+      modelsDevModelId: "m",
+      changedAt,
+      kind: "price",
+    }),
+  );
+  await t.mutation(api.config.update, { enabled: false, retentionDays: 30 });
+  await t.action(internal.sync.tick, {});
+  expect(
+    await t.query(api.models.listPriceChanges, { modelsDevProviderId: "p", modelsDevModelId: "m" }),
+  ).toHaveLength(1);
+  await t.mutation(api.config.update, { enabled: true, retentionDays: 365 });
+  await t.mutation(internal.sync.cleanupPriceChanges, {});
+  expect(
+    await t.query(api.models.listPriceChanges, { modelsDevProviderId: "p", modelsDevModelId: "m" }),
+  ).toHaveLength(1);
+});
+
+test("equivalents selects the cheapest provider before applying the limit", async () => {
+  const t = componentTest();
+  await t.run(async (ctx) => {
+    for (const [modelsDevProviderId, price] of [
+      ["expensive", 10],
+      ["cheap", 1],
+    ] as const)
+      await ctx.db.insert("models", {
+        ...fixtureModel("openai", "gpt-5.4"),
+        modelsDevProviderId,
+        modelsDevCanonicalModelId: "canonical",
+        costBlended: price,
+        costOrder: -price,
+        contentHash: "h",
+        firstSeenAt: 0,
+        updatedAt: 0,
+      });
+  });
+  expect(
+    await t.query(api.models.listEquivalents, { modelsDevCanonicalModelId: "canonical", limit: 1 }),
+  ).toMatchObject([{ modelsDevProviderId: "cheap" }]);
+});
+
+test("equivalents sorts the largest finite price before unpriced models", async () => {
+  const t = componentTest();
+  const raw = rawModel(fixtureCatalog, "openai", "gpt-5-mini");
+  await t.run(async (ctx) => {
+    for (const [modelsDevProviderId, cost] of [
+      ["unpriced", undefined],
+      ["priced", { input: Number.MAX_VALUE, output: Number.MAX_VALUE }],
+    ] as const) {
+      const row = requireValue(
+        normalizeModel(modelsDevProviderId, "m", {
+          ...raw,
+          cost,
+          canonical_model_id: "extreme",
+        }),
+      );
+      await ctx.db.insert("models", { ...row, contentHash: "h", firstSeenAt: 0, updatedAt: 0 });
+    }
+  });
+  expect(
+    (await t.query(api.models.listEquivalents, { modelsDevCanonicalModelId: "extreme" })).map(
+      (row) => row.modelsDevProviderId,
+    ),
+  ).toEqual(["priced", "unpriced"]);
+});
+
+test("unknown modality filters are rejected", async () => {
+  const t = componentTest();
+  await expect(
+    t.query(api.models.listCheapest, { inputModalities: ["typo"] }),
+  ).rejects.toMatchObject({
+    data: { code: "MODELS_DEV_INVALID_ARGUMENT" },
+  });
+  await expect(
+    t.query(api.models.list, {
+      outputModalities: ["typo"],
+      paginationOpts: { numItems: 5, cursor: null },
+    }),
+  ).rejects.toMatchObject({ data: { code: "MODELS_DEV_INVALID_ARGUMENT" } });
+});
+
+test.each(["not-json", "{}", "null", "[{}]"])(
+  "malformed cursor %s has a package error",
+  async (cursor) => {
+    const t = componentTest();
+    for (const paginationOpts of [
+      { numItems: 5, cursor },
+      { numItems: 5, cursor: null, endCursor: cursor },
+    ])
+      await expect(t.query(api.models.list, { paginationOpts })).rejects.toMatchObject({
+        data: { code: "MODELS_DEV_INVALID_ARGUMENT" },
+      });
+  },
+);
+
+test("numeric query bounds reject NaN and infinity", async () => {
+  const t = componentTest();
+  const invalid = { data: { code: "MODELS_DEV_INVALID_ARGUMENT" } };
+  await expect(t.query(api.models.listCheapest, { limit: NaN })).rejects.toMatchObject(invalid);
+  await expect(t.query(api.models.search, { query: "x", limit: NaN })).rejects.toMatchObject(
+    invalid,
+  );
+  await expect(
+    t.query(api.models.listEquivalents, { modelsDevCanonicalModelId: "x", limit: NaN }),
+  ).rejects.toMatchObject(invalid);
+  await expect(
+    t.query(api.models.listPriceChanges, {
+      modelsDevProviderId: "p",
+      modelsDevModelId: "m",
+      limit: NaN,
+    }),
+  ).rejects.toMatchObject(invalid);
+  await expect(
+    t.query(api.models.list, { paginationOpts: { numItems: NaN, cursor: null } }),
+  ).rejects.toMatchObject(invalid);
+});
+
+test("list honors byte budgets", async () => {
+  const t = componentTest();
+  await relaxGuards(t);
+  catalogServer({ body: fixtureJson() });
+  await sync(t);
+  const first = await t.query(api.models.list, {
+    paginationOpts: { cursor: null, numItems: 100, maximumBytesRead: 1 },
+  });
+  expect(first.page.length).toBeLessThan(3);
+  expect(first.pageStatus).toBe("SplitRequired");
+  expect(first.splitCursor).toBeTypeOf("string");
+});
+
+test("list preserves pinned split metadata", async () => {
+  const t = componentTest();
+  await relaxGuards(t);
+  catalogServer({ body: fixtureJson() });
+  await sync(t);
+  const pinned = await t.query(api.models.list, {
+    includeDeprecated: true,
+    paginationOpts: { cursor: null, numItems: 1, endCursor: "[]", maximumRowsRead: 2 },
+  });
+  expect(pinned.pageStatus).toBe("SplitRequired");
+  expect(pinned.splitCursor).toBeTypeOf("string");
+});
+
+test("invalid usage throws before model resolution", async () => {
+  const t = componentTest();
+  const invalid = { data: { code: "MODELS_DEV_INVALID_ARGUMENT" } };
+  for (const count of [NaN, -1, Infinity, -Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    expect(() =>
+      estimateCost(
+        { costInput: 1, costOutput: 1 },
+        { inputTokens: count },
+        { mode: null, inputTokenScope: "includesCache" },
+      ),
+    ).toThrow();
+    await expect(
+      t.query(api.models.estimateCost, {
+        mode: null,
+        inputTokenScope: "includesCache",
+        provider: "missing",
+        model: "missing",
+        usage: { outputTokens: count },
+      }),
+    ).rejects.toMatchObject(invalid);
+  }
+  expect(() =>
+    estimateCost(
+      {},
+      { inputTokens: 1, promptTokens: -1 },
+      { mode: null, inputTokenScope: "includesCache" },
+    ),
+  ).toThrow();
+});
+
+test("an unpriced requested mode is unknown", async () => {
+  const modeModel = {
+    costInput: 1,
+    costOutput: 2,
+    modes: {
+      empty: { cost: {} },
+      tiersOnly: { tiers: [{ size: 100, input: 3, output: 4 }] },
+    },
+  };
+  expect(
+    estimateCost(
+      modeModel,
+      { inputTokens: 10 },
+      { inputTokenScope: "includesCache", mode: "empty" },
+    ),
+  ).toEqual({ known: false });
+  expect(
+    estimateCost(
+      modeModel,
+      { inputTokens: 10 },
+      { inputTokenScope: "includesCache", mode: "tiersOnly" },
+    ),
+  ).toEqual({
+    known: false,
+  });
+  expect(
+    estimateCost(
+      modeModel,
+      { inputTokens: 101 },
+      { inputTokenScope: "includesCache", mode: "tiersOnly" },
+    ),
+  ).toMatchObject({
+    known: true,
+    nanoUsd: 303000,
+    mode: "tiersOnly",
+  });
+  expect(
+    estimateCost(
+      fixtureModel("openai", "gpt-5.4"),
+      { inputTokens: 10 },
+      { inputTokenScope: "includesCache", mode: "absent" },
+    ),
+  ).toEqual({ known: false });
+  const t = componentTest();
+  await relaxGuards(t);
+  catalogServer({ body: fixtureJson() });
+  await sync(t);
+  expect(
+    await t.query(api.models.estimateCost, {
+      inputTokenScope: "includesCache",
+      provider: "openai",
+      model: "gpt-5.4",
+      usage: { inputTokens: 10 },
+      mode: "absent",
+    }),
+  ).toEqual({ known: false });
+});
+
+test("provider cheapest reads past unrelated rows and reports scan truncation", async () => {
+  const t = componentTest();
+  const base = fixtureModel("openai", "gpt-5.4");
+  await t.run(async (ctx) => {
+    for (let i = 0; i < 4001; i++)
+      await ctx.db.insert("models", {
+        ...base,
+        modelsDevProviderId: "unrelated",
+        modelsDevModelId: `m-${i}`,
+        costBlended: 0,
+        contentHash: "h",
+        firstSeenAt: 0,
+        updatedAt: 0,
+      });
+    for (const [modelsDevProviderId, costBlended] of [
+      ["wanted", 5],
+      ["other", 2],
+    ] as const)
+      await ctx.db.insert("models", {
+        ...base,
+        modelsDevProviderId,
+        costBlended,
+        contentHash: "h",
+        firstSeenAt: 0,
+        updatedAt: 0,
+      });
+  });
+  const result = await t.query(api.models.listCheapest, {
+    modelsDevProviderIds: ["wanted", "other", "wanted"],
+    limit: 5,
+  });
+  expect(result).toMatchObject({
+    models: [{ modelsDevProviderId: "other" }, { modelsDevProviderId: "wanted" }],
+    isComplete: true,
+  });
+  expect(await t.query(api.models.listCheapest, { reasoning: !base.reasoning })).toEqual({
+    models: [],
+    isComplete: false,
+  });
+  expect(await t.query(api.models.listCheapest, { modelsDevProviderIds: [] })).toEqual({
+    models: [],
+    isComplete: true,
+  });
+}, 60000);
+
+test("cheapest stops before requesting row 4001", async () => {
+  const t = componentTest();
+  const base = fixtureModel("openai", "gpt-5.4");
+  await t.run(async (ctx) => {
+    for (let i = 0; i < 4001; i++)
+      await ctx.db.insert("models", {
+        ...base,
+        modelsDevModelId: `scan-${i}`,
+        contentHash: "h",
+        firstSeenAt: 0,
+        updatedAt: 0,
+      });
+  });
+  let reads = 0;
+  await t.run(async (ctx) => {
+    const ordered = ctx.db
+      .query("models")
+      .withIndex("by_costBlended", (q) => q.gte("costBlended", 0));
+    const iterator = ordered[Symbol.asyncIterator]();
+    const observed = new Proxy(ordered, {
+      get(target, key, receiver) {
+        if (key === Symbol.asyncIterator)
+          return () => ({
+            async next() {
+              const result = await iterator.next();
+              if (!result.done) reads++;
+              return result;
+            },
+            async return() {
+              return iterator.return ? iterator.return() : { done: true, value: undefined };
+            },
+          });
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const initializer = new Proxy(ctx.db.query("models"), {
+      get(target, key, receiver) {
+        return key === "withIndex" ? () => observed : Reflect.get(target, key, receiver);
+      },
+    });
+    const db = new Proxy(ctx.db, {
+      get(target, key, receiver) {
+        return key === "query" ? () => initializer : Reflect.get(target, key, receiver);
+      },
+    });
+    const handler = Reflect.get(listCheapest, "_handler") as (
+      context: typeof ctx,
+      args: { reasoning: boolean },
+    ) => Promise<unknown>;
+    expect(await handler({ ...ctx, db }, { reasoning: !base.reasoning })).toEqual({
+      models: [],
+      isComplete: false,
+    });
+  });
+  expect(reads).toBe(4000);
+}, 60000);

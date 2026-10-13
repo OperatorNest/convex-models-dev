@@ -53,11 +53,11 @@ export const getEffective = internalQuery({
 
 function assertFinite(value: number, min: number) {
   if (!Number.isFinite(value) || value < min) {
-    throw modelsDevError("MODELS_DEV_INVALID_CONFIG");
+    throw modelsDevError("MODELS_DEV_INVALID_ARGUMENT");
   }
 }
 
-export const configure = mutation({
+export const update = mutation({
   args: {
     enabled: v.optional(v.boolean()),
     sourceUrl: v.optional(v.string()),
@@ -70,18 +70,18 @@ export const configure = mutation({
   handler: async (ctx, args) => {
     if (args.sourceUrl !== undefined) {
       if (!wellFormed(args.sourceUrl) || utf8Bytes(args.sourceUrl) > 2048)
-        throw modelsDevError("MODELS_DEV_INVALID_SOURCE_URL");
+        throw modelsDevError("MODELS_DEV_INVALID_ARGUMENT");
       let url: URL;
       try {
         url = new URL(args.sourceUrl);
       } catch {
-        throw modelsDevError("MODELS_DEV_INVALID_SOURCE_URL");
+        throw modelsDevError("MODELS_DEV_INVALID_ARGUMENT");
       }
       if (url.protocol !== "https:") {
-        throw modelsDevError("MODELS_DEV_INVALID_SOURCE_URL");
+        throw modelsDevError("MODELS_DEV_INVALID_ARGUMENT");
       }
       if (url.username || url.password) {
-        throw modelsDevError("MODELS_DEV_INVALID_SOURCE_URL");
+        throw modelsDevError("MODELS_DEV_INVALID_ARGUMENT");
       }
     }
     if (args.minIntervalMinutes !== undefined) {

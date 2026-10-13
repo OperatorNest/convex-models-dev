@@ -1,57 +1,50 @@
-# Working in this repository
+The package is `@operatornest/convex-models-dev`, component name `modelsDev`.
 
-Read `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `docs/adr/` and the local Convex guidance in `example/convex/_generated/ai/guidelines.md` before changing behavior.
+## Scope
 
-## Boundaries
+Read [README.md](README.md), [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) and [ADRs](docs/adr/) before changing behavior. The [Concepts table](README.md#concepts) defines caller vocabulary. Keep changes within this component and its example.
 
-- Package: `@operatornest/convex-models-dev`; component: `modelsDev`; error prefix: `MODELS_DEV_`.
-- Shipped `src/` runs in Convex's default runtime. No `"use node"`, Node built-ins, `Buffer` or `process`.
-- `convex` and `convex-helpers` are peers; no runtime dependencies. An official `@convex-dev/*` component dependency requires an ADR naming its work.
-- No component environment variables, secrets or webhooks. Never store or log credentials.
+## Runtime and security boundaries
+
+- Shipped `src/` uses Convex's default runtime: no `"use node"`, Node built-ins, `Buffer` or `process`.
+- `convex` and `convex-helpers` are peers; there are no runtime dependencies. Adding an official component dependency requires an ADR.
+- There are no component environment variables, credentials, HTTP routes or test mode. Never store or log credentials.
 - App wrappers authorize callers. Example maintenance functions are internal; public example queries require authentication.
-- Treat catalogs as untrusted. Preserve download, normalization, size, removal and lease guards. Every catalog mutation clears cache validators before writing; only completed data syncs restore them.
-- Throw `modelsDevError(code, providerStatus?)` with a fixed message. Add a code, message and README error row together.
-- Every public function declares `args` and `returns`. `v.any()` is restricted to passthrough fields named `raw*`.
+- Treat catalog data as untrusted. Preserve download, normalization, storage-size, catalog-loss and lease guards.
+- Catalog mutations clear cache validators before writing; only completed data syncs restore them.
+- Throw `modelsDevError(code, details?)` with its fixed message. Add a code, message and README error row together.
+
+## Query and validator patterns
+
+- Every public function declares `args` and `returns`. Restrict `v.any()` to passthrough fields named `raw*`.
 - Define shapes in `src/shared/validators.ts`; derive types with `Infer`. Use `schema.doc` and `paginationResultValidator` for documents and pages.
 - Reads are indexed and bounded. Use `paginator` with `boundedPage`; no built-in component `.paginate()`, production `.collect()` or query clock reads.
-- Index names list fields in order, joined by `_and_`; every index has a reader. Client arguments copy declared fields without caller-object spreads.
-- No non-null assertions, `as unknown as`, TODOs or commented-out source. Comments state only constraints the code cannot express. Never weaken lint or coverage gates.
+- Index names list every field in order joined by `_and_`; every index has a reader.
+- Client groups call only same-named component modules and copy declared argument fields explicitly.
+- No non-null assertions, `as unknown as`, TODOs or commented-out source. Comments explain only invariants, bounds or external constraints; exported client methods and types have one TSDoc sentence.
 
-## Files
+## Generated files
 
-| Path                                                   | Responsibility                                                      |
-| ------------------------------------------------------ | ------------------------------------------------------------------- |
-| `src/component/schema.ts`                              | Catalog, history, sync lease and settings tables.                   |
-| `src/component/sync.ts`                                | Sync entrypoints, lease-fenced writes and retention.                |
-| `src/component/syncCore.ts`                            | Bounded fetch, validation, byte-batched upsert and guarded removal. |
-| `src/component/models.ts`, `providers.ts`, `config.ts` | Catalog queries and settings.                                       |
-| `src/shared/`                                          | Validators, errors, bounds, normalization, cost and resolution.     |
-| `src/client/index.ts`                                  | App wrapper and pure exports.                                       |
-| `src/test.ts`, `src/import-meta.d.ts`                  | Published convex-test registration without Vite types.              |
-| `src/test-helpers.ts`, `src/fixtures/`                 | Unpublished fetch stubs and fixtures.                               |
-| `example/convex/`                                      | App wrappers and integration tests.                                 |
-| `scripts/check-source.mjs`, `smoke.mjs`                | Source invariants and isolated local runtime journey.               |
+Never edit `src/component/_generated/` or `example/convex/_generated/` by hand. Change inputs, run `pnpm build:codegen`, inspect generated diffs and include them with the source change. Ignore `example/convex/_generated/ai/` and `dist/`.
 
-## Generated output
+A fresh checkout needs `CONVEX_AGENT_MODE=anonymous pnpm exec convex init` before codegen. Never configure a cloud target for local checks. Codegen and smoke share a local lock; do not terminate another checkout's backend.
 
-Never edit `src/component/_generated/` or `example/convex/_generated/` by hand. Change inputs, run `pnpm build:codegen`, review generated diffs and include them with the source change. `dist/` is ignored build output. A fresh checkout needs `CONVEX_AGENT_MODE=anonymous pnpm exec convex init` before codegen; never configure a cloud target for local checks.
+## Toolchain and verification
 
-## Verification
+Use Node 24 and pnpm 12.9.1 through mise. Enable `strict`, `noUncheckedIndexedAccess`, `noImplicitOverride` and `noFallthroughCasesInSwitch`. Keep `exactOptionalPropertyTypes` disabled because imported `convex-helpers` TypeScript source fails it; recheck on each upgrade.
 
-Use Node 24 and pnpm 12.9.1 through mise. Keep repository configuration consistent with those versions. Read `.agents/skills/` when its contributor guidance applies.
+Start with affected tests and formatting, then run the required checks:
 
-Start with affected tests and formatting, then run the required gate:
+| Change                              | Checks                                                                          |
+| ----------------------------------- | ------------------------------------------------------------------------------- |
+| Component, schema or shared runtime | `pnpm build:codegen`, `pnpm test`, `pnpm typecheck`, `pnpm smoke`               |
+| Client or exports                   | `pnpm build`, `pnpm typecheck`, `pnpm knip`, affected client tests, `pnpm test` |
+| Tooling or repository rules         | `pnpm check`                                                                    |
+| Prose Markdown                      | `pnpm fmt:check`                                                                |
+| Executable docs                     | Formatting, affected example/client tests and smoke for runtime claims          |
 
-| Change                              | Checks                                                                           |
-| ----------------------------------- | -------------------------------------------------------------------------------- |
-| Component, schema or shared runtime | `pnpm build:codegen`, `pnpm test`, `pnpm typecheck`, `pnpm smoke`.               |
-| Client or exports                   | `pnpm build`, `pnpm typecheck`, `pnpm knip`, affected client tests, `pnpm test`. |
-| Tooling or repository rules         | `pnpm check`.                                                                    |
-| Prose Markdown                      | `pnpm fmt:check`.                                                                |
-| Executable docs                     | Formatting and affected example/client tests; smoke for runtime claims.          |
+Tests stub fetch and call `relaxGuards` for small fixtures. Component tests use `componentTest`; shared helpers belong in `src/test-helpers.ts`. Use `vi.setSystemTime` for clock-dependent assertions and restore timers after each test. Coverage floors are at least 90% statements and 85% branches; never weaken gates.
 
-Tests stub fetch and call `relaxGuards` for small fixtures. Component tests use `componentTest`; shared test helpers belong in `src/test-helpers.ts`. Use `vi.setSystemTime` for clock-dependent assertions and restore timers after each test. Coverage floors may only hold or rise: 90% statements and 85% branches.
+Smoke installs a tarball in a disposable consumer, compiles strict TypeScript, runs Vitest and calls an anonymous local backend with fixture catalog endpoints and isolated ports. It removes inherited deployment selectors and never calls live catalog providers. Local smoke proves neither cloud execution nor live-provider behavior.
 
-`pnpm smoke` installs a tarball in a disposable consumer app, runs strict TypeScript and Vitest, replaces source destinations there with a local fixture server, and checks real-runtime calls on an anonymous backend with isolated ports. It strips inherited deployment selectors and never calls live providers. Codegen and smoke use the shared local lock. Do not terminate another checkout's backend.
-
-Keep changes scoped to this component and its example. Update an ADR when a contract changes. Report commands and exit codes; local smoke proves neither cloud execution nor live-provider behavior. Publishing, pushing, deploying and registry submissions require explicit authorization.
+Update an ADR when a recorded design changes. Report commands and exit codes. Publishing, pushing, deploying and registry submissions require explicit authorization.

@@ -10,7 +10,8 @@ export const DEFAULT_PROVIDER_ALIASES: Readonly<Record<string, string>> = {
   together: "togetherai",
 };
 
-export function providerCandidates(
+/** Lists catalog provider candidates for an aliased provider name. */
+export function listProviderCandidates(
   provider: string,
   aliases: Record<string, string> = {},
 ): string[] {
@@ -27,26 +28,31 @@ export function providerCandidates(
   return [...new Set(candidates)];
 }
 
+/** Resolves a provider name and model name into catalog identifiers. */
 export function resolveModel(args: {
   provider: string;
   model: string;
   aliases?: Record<string, string>;
-}): { providerId: string; modelId: string } {
-  const [providerId] = providerCandidates(args.provider, args.aliases);
-  return { providerId: providerId ?? args.provider, modelId: args.model };
+}): { modelsDevProviderId: string; modelsDevModelId: string } {
+  const [modelsDevProviderId] = listProviderCandidates(args.provider, args.aliases);
+  return {
+    modelsDevProviderId: modelsDevProviderId ?? args.provider,
+    modelsDevModelId: args.model,
+  };
 }
 
+/** Splits a provider-qualified catalog model key at a known provider prefix. */
 export function splitModelKey(
   key: string,
-  isProvider: (providerId: string) => boolean,
-): { providerId: string; modelId: string } | null {
+  isProvider: (modelsDevProviderId: string) => boolean,
+): { modelsDevProviderId: string; modelsDevModelId: string } | null {
   for (let i = 0; i < key.length; i++) {
     const char = key[i];
     if (char !== "/" && char !== ":") continue;
-    const providerId = key.slice(0, i);
-    if (providerId && isProvider(providerId)) {
-      const modelId = key.slice(i + 1);
-      return modelId ? { providerId, modelId } : null;
+    const modelsDevProviderId = key.slice(0, i);
+    if (modelsDevProviderId && isProvider(modelsDevProviderId)) {
+      const modelsDevModelId = key.slice(i + 1);
+      return modelsDevModelId ? { modelsDevProviderId, modelsDevModelId } : null;
     }
   }
   return null;

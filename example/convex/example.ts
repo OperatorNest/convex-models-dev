@@ -2,9 +2,9 @@ import {
   ModelsDev,
   syncStatusValidator,
   syncSummaryValidator,
-  usageFromAgent,
+  extractUsage,
 } from "@operatornest/convex-models-dev";
-import { paginationResultValidator } from "convex/server";
+import { paginationOptsValidator, paginationResultValidator } from "convex/server";
 import { v, type Infer } from "convex/values";
 import { components } from "./_generated/api.js";
 import { internalAction, internalMutation, query, type QueryCtx } from "./_generated/server.js";
@@ -15,10 +15,10 @@ async function requireIdentity(ctx: Pick<QueryCtx, "auth">): Promise<void> {
 const modelsDev = new ModelsDev(components.modelsDev);
 
 const modelSummary = v.object({
-  providerId: v.string(),
-  modelId: v.string(),
+  modelsDevProviderId: v.string(),
+  modelsDevModelId: v.string(),
   name: v.string(),
-  contextLimit: v.number(),
+  context: v.number(),
   costInput: v.optional(v.number()),
   costOutput: v.optional(v.number()),
 });
@@ -26,10 +26,10 @@ type ModelSummary = Infer<typeof modelSummary>;
 
 function summarize(m: ModelSummary): ModelSummary {
   return {
-    providerId: m.providerId,
-    modelId: m.modelId,
+    modelsDevProviderId: m.modelsDevProviderId,
+    modelsDevModelId: m.modelsDevModelId,
     name: m.name,
-    contextLimit: m.contextLimit,
+    context: m.context,
     ...(m.costInput !== undefined && { costInput: m.costInput }),
     ...(m.costOutput !== undefined && { costOutput: m.costOutput }),
   };
@@ -40,14 +40,20 @@ export const syncStatus = query({
   returns: syncStatusValidator,
   handler: async (ctx) => {
     await requireIdentity(ctx);
-    return modelsDev.sync.status(ctx);
+    return modelsDev.sync.getStatus(ctx);
   },
 });
 
 export const syncNow = internalAction({
-  args: { force: v.optional(v.boolean()) },
+  args: {},
   returns: syncSummaryValidator,
-  handler: (ctx, { force }) => modelsDev.sync.now(ctx, force === undefined ? {} : { force }),
+  handler: (ctx) => modelsDev.sync.run(ctx),
+});
+
+export const syncForced = internalAction({
+  args: {},
+  returns: syncSummaryValidator,
+  handler: (ctx) => modelsDev.sync.runForced(ctx),
 });
 
 export const configureSync = internalMutation({
@@ -70,24 +76,24 @@ export const getModel = query({
 });
 
 export const listModels = query({
-  args: { cursor: v.union(v.string(), v.null()), numItems: v.number() },
+  args: { paginationOpts: paginationOptsValidator },
   returns: paginationResultValidator(modelSummary),
-  handler: async (ctx, { cursor, numItems }) => {
+  handler: async (ctx, { paginationOpts }) => {
     await requireIdentity(ctx);
-    const result = await modelsDev.models.list(ctx, { paginationOpts: { cursor, numItems } });
+    const result = await modelsDev.models.list(ctx, { paginationOpts });
     return { ...result, page: result.page.map(summarize) };
   },
 });
 
 export const cheapestWithTools = query({
-  args: { minContext: v.optional(v.number()) },
+  args: { minContextTokens: v.optional(v.number()) },
   returns: v.object({ models: v.array(modelSummary), isComplete: v.boolean() }),
-  handler: async (ctx, { minContext }) => {
+  handler: async (ctx, { minContextTokens }) => {
     await requireIdentity(ctx);
-    const result = await modelsDev.models.cheapest(ctx, {
+    const result = await modelsDev.models.listCheapest(ctx, {
       toolCall: true,
       excludeFree: true,
-      ...(minContext !== undefined && { minContext }),
+      ...(minContextTokens !== undefined && { minContextTokens }),
     });
     return { models: result.models.map(summarize), isComplete: result.isComplete };
   },
@@ -97,6 +103,8 @@ export const costOfUsage = query({
   args: {
     provider: v.string(),
     model: v.string(),
+    mode: v.union(v.string(), v.null()),
+    inputTokenScope: v.union(v.literal("includesCache"), v.literal("excludesCache")),
 
     rawUsage: v.any(),
     rawProviderMetadata: v.optional(v.any()),
@@ -105,9 +113,11 @@ export const costOfUsage = query({
   handler: async (ctx, args) => {
     await requireIdentity(ctx);
     const estimate = await modelsDev.models.estimateCost(ctx, {
+      mode: args.mode,
+      inputTokenScope: args.inputTokenScope,
       provider: args.provider,
       model: args.model,
-      usage: usageFromAgent({
+      usage: extractUsage({
         usage: args.rawUsage,
         providerMetadata: args.rawProviderMetadata,
       }),

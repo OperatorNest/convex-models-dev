@@ -4,11 +4,13 @@ import type {
   CostBreakdown,
   CostEstimate,
   ModelRow,
-  PriceFields,
-  PriceTier,
+  CostFields,
+  CostTier,
   UsageInput,
+  InputTokenScope,
 } from "./validators.js";
 
+/** Contains the catalog rates and tiers needed to estimate token cost. */
 export type CostModel = Pick<
   ModelRow,
   | "costInput"
@@ -24,15 +26,16 @@ export type CostModel = Pick<
   updatedAt?: number;
 };
 
+/** Selects a pricing mode and declares whether reported input includes cache tokens. */
 export type EstimateCostOptions = {
-  mode?: string;
+  mode: string | null;
 
-  inputIncludesCache?: boolean;
+  inputTokenScope: InputTokenScope;
 };
 
 const UNKNOWN: CostEstimate = { known: false };
 
-const PRICE_KEYS: (keyof PriceFields)[] = [
+const PRICE_KEYS: (keyof CostFields)[] = [
   "input",
   "output",
   "cacheRead",
@@ -57,8 +60,8 @@ function defined(value: number | undefined): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
-function storedPrices(model: CostModel): PriceFields {
-  const out: PriceFields = {};
+function storedPrices(model: CostModel): CostFields {
+  const out: CostFields = {};
   const columns = [
     ["input", model.costInput],
     ["output", model.costOutput],
@@ -75,9 +78,9 @@ function storedPrices(model: CostModel): PriceFields {
   return out;
 }
 
-function overlay(base: PriceFields, over: PriceFields | undefined): PriceFields {
+function overlay(base: CostFields, over: CostFields | undefined): CostFields {
   if (!over) return base;
-  const out: PriceFields = { ...base };
+  const out: CostFields = { ...base };
   for (const key of PRICE_KEYS) {
     const value = defined(over[key]);
     if (value !== undefined) out[key] = value;
@@ -85,8 +88,8 @@ function overlay(base: PriceFields, over: PriceFields | undefined): PriceFields 
   return out;
 }
 
-function selectTier(tiers: PriceTier[] | undefined, prompt: number): PriceTier | undefined {
-  let picked: PriceTier | undefined;
+function selectTier(tiers: CostTier[] | undefined, prompt: number): CostTier | undefined {
+  let picked: CostTier | undefined;
   for (const tier of tiers ?? []) {
     if (typeof tier.size !== "number") continue;
     // models.dev writes "starts at N" thresholds as N+1 (e.g. 200001).
@@ -100,10 +103,11 @@ function nano(count: number, pricePerMillion: number): number {
   return Math.round(count * pricePerMillion * 1e3);
 }
 
+/** Estimates token cost from catalog rates and explicit pricing choices. */
 export function estimateCost(
   model: CostModel,
   usage: UsageInput,
-  opts: EstimateCostOptions = {},
+  opts: EstimateCostOptions,
 ): CostEstimate {
   validateUsage(usage);
   const cacheRead = tokens(usage.cacheReadTokens ?? usage.cachedInputTokens);
@@ -115,7 +119,7 @@ export function estimateCost(
 
   const reported = usage.inputTokens ?? usage.promptTokens;
   let prompt = reported === undefined ? noCache + cacheRead + cacheWrite : tokens(reported);
-  if (opts.inputIncludesCache === false && reported !== undefined) {
+  if (opts.inputTokenScope === "excludesCache" && reported !== undefined) {
     prompt = tokens(reported) + cacheRead + cacheWrite;
   }
   if (!Number.isSafeInteger(prompt)) return UNKNOWN;
@@ -136,14 +140,14 @@ export function estimateCost(
   const assumptions: string[] = [];
   const base = table;
   let mode: string | null = null;
-  const modeEntry = opts.mode !== undefined ? model.modes?.[opts.mode] : undefined;
+  const modeEntry = opts.mode !== null ? model.modes?.[opts.mode] : undefined;
   const modeTier = selectTier(modeEntry?.tiers, prompt);
   const modePriced = PRICE_KEYS.some(
     (key) =>
       defined(modeEntry?.cost?.[key]) !== undefined || defined(modeTier?.[key]) !== undefined,
   );
-  if (opts.mode !== undefined && !modePriced) return UNKNOWN;
-  if (opts.mode !== undefined) {
+  if (opts.mode !== null && !modePriced) return UNKNOWN;
+  if (opts.mode !== null) {
     table = overlay(table, modeEntry?.cost);
     mode = opts.mode;
   }
@@ -161,7 +165,7 @@ export function estimateCost(
       if (mode === null) table = overlay(table, tier);
       else {
         const tierTable = overlay(base, tier);
-        const merged: PriceFields = {};
+        const merged: CostFields = {};
         for (const key of PRICE_KEYS) {
           const value = Math.max(table[key] ?? -1, tierTable[key] ?? -1);
           if (value >= 0) merged[key] = value;
@@ -236,7 +240,8 @@ function obj(value: unknown): Record<string, unknown> | undefined {
   return isRecord(value) ? value : undefined;
 }
 
-export function usageFromAgent(args: { usage?: unknown; providerMetadata?: unknown }): UsageInput {
+/** Extracts model token counts from AI SDK usage and provider metadata. */
+export function extractUsage(args: { usage?: unknown; providerMetadata?: unknown }): UsageInput {
   const usage = obj(args.usage) ?? {};
   const inputDetails = obj(usage.inputTokenDetails) ?? {};
   const outputDetails = obj(usage.outputTokenDetails) ?? {};

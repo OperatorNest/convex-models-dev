@@ -35,7 +35,7 @@ test("app syncs through the client and reads the catalog", async () => {
   const server = catalogServer({ body: fixtureJson() });
   await t.mutation(internal.example.configureSync, { minProviders: 1, minModels: 1 });
 
-  const synced = await t.action(internal.example.syncNow, { force: true });
+  const synced = await t.action(internal.example.syncForced, {});
   expect(synced).toMatchObject({ status: "ok", modelCount: FIXTURE_MODEL_COUNT });
   expect(server.calls).toHaveLength(1);
   expect(await t.query(api.example.syncStatus, {})).toMatchObject({
@@ -46,17 +46,17 @@ test("app syncs through the client and reads the catalog", async () => {
 
   expect(await t.query(api.example.getModel, { key: "anthropic/claude-sonnet-4-5" })).toMatchObject(
     {
-      providerId: "anthropic",
-      modelId: "claude-sonnet-4-5",
+      modelsDevProviderId: "anthropic",
+      modelsDevModelId: "claude-sonnet-4-5",
       costInput: 3,
       costOutput: 15,
     },
   );
-  const cheap = await t.query(api.example.cheapestWithTools, { minContext: 1_000_000 });
+  const cheap = await t.query(api.example.cheapestWithTools, { minContextTokens: 1_000_000 });
   expect(cheap.models.length).toBeGreaterThan(0);
-  expect(cheap.models.every((m) => m.contextLimit >= 1_000_000)).toBe(true);
+  expect(cheap.models.every((m) => m.context >= 1_000_000)).toBe(true);
 
-  expect(await t.action(internal.example.syncNow, { force: true })).toMatchObject({
+  expect(await t.action(internal.example.syncForced, {})).toMatchObject({
     status: "not_modified",
   });
 });
@@ -65,9 +65,11 @@ test("agent usage is mapped and priced in nano-USD", async () => {
   const t = setup();
   catalogServer({ body: fixtureJson() });
   await t.mutation(internal.example.configureSync, { minProviders: 1, minModels: 1 });
-  await t.action(internal.example.syncNow, { force: true });
+  await t.action(internal.example.syncForced, {});
 
   const nano = await t.query(api.example.costOfUsage, {
+    mode: null,
+    inputTokenScope: "includesCache",
     provider: "anthropic.messages",
     model: "claude-sonnet-4-5",
     rawUsage: { inputTokens: 1000, outputTokens: 500, cachedInputTokens: 0 },
@@ -75,6 +77,8 @@ test("agent usage is mapped and priced in nano-USD", async () => {
   expect(nano).toBe(10_500_000);
   expect(
     await t.query(api.example.costOfUsage, {
+      mode: null,
+      inputTokenScope: "includesCache",
       provider: "openai",
       model: "gpt-image-1-mini",
       rawUsage: { inputTokens: 1 },

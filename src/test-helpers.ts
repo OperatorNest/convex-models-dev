@@ -15,7 +15,7 @@ export function componentTest() {
 export type ComponentTest = ReturnType<typeof componentTest>;
 
 export async function relaxGuards(t: ComponentTest) {
-  await t.mutation(api.config.configure, { minProviders: 1, minModels: 1 });
+  await t.mutation(api.config.update, { minProviders: 1, minModels: 1 });
 }
 
 export function requireValue<Value>(value: Value | null | undefined): Value {

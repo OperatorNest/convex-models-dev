@@ -1,20 +1,22 @@
-import { describe, expect, test } from "vitest";
-import { fixtureCatalog, fixtureModel, rawModel } from "../fixtures/index.js";
-import { canonicalJson, rowHash, sha256Hex } from "./hash.js";
+import { expect, test, describe } from "vitest";
+
+import { fixtureModel, fixtureCatalog, rawModel } from "../fixtures/index.js";
 import {
-  inspectCatalog,
-  modalityMask,
   normalizeModel,
   normalizeProvider,
+  inspectCatalog,
+  modalityMask,
   pricingOf,
 } from "./normalize.js";
+
+import { canonicalJson, rowHash, sha256Hex } from "./hash.js";
 
 describe("normalizeModel", () => {
   test("flattens a tiered model with modes", () => {
     const row = fixtureModel("openai", "gpt-5.4");
     expect(row).toMatchObject({
-      providerId: "openai",
-      modelId: "gpt-5.4",
+      modelsDevProviderId: "openai",
+      modelsDevModelId: "gpt-5.4",
       hasCost: true,
       costInput: 2.5,
       costOutput: 15,
@@ -105,7 +107,7 @@ describe("providers and catalog shape", () => {
         4,
       ),
     ).toEqual({
-      providerId: "anthropic",
+      modelsDevProviderId: "anthropic",
       name: "Anthropic",
       npm: "@ai-sdk/anthropic",
       env: ["K"],
@@ -171,4 +173,58 @@ describe("hashing", () => {
     expect(await rowHash({ a: 1, b: 2 })).toBe(await rowHash({ b: 2, a: 1 }));
     expect(await rowHash({ a: 1 })).not.toBe(await rowHash({ a: 2 }));
   });
+});
+
+test.each([
+  { name: "x".repeat(2_000_000) },
+  { name: "\ud800" },
+  { description: "😀".repeat(20_000) },
+  { reasoning_options: Array.from({ length: 129 }, () => ({ type: "toggle" })) },
+])("unrepresentable remote values are skipped, case %#", (patch) => {
+  expect(
+    normalizeModel("openai", "m", {
+      ...rawModel(fixtureCatalog, "openai", "gpt-5-mini"),
+      ...patch,
+    }),
+  ).toBeNull();
+});
+
+test("provider strings and arrays obey storage bounds", () => {
+  expect(normalizeProvider("p", { name: "\ud800" }, 1)).toBeNull();
+  expect(normalizeProvider("p", { env: Array.from({ length: 129 }, () => "KEY") }, 1)).toBeNull();
+});
+
+test.each([{ min: -1 }, { max: Infinity }, { min: 10, max: 1 }])(
+  "invalid reasoning budgets are skipped: %j",
+  (bounds) => {
+    expect(
+      normalizeModel("p", "m", {
+        ...rawModel(fixtureCatalog, "openai", "gpt-5-mini"),
+        reasoning_options: [{ type: "budget_tokens", ...bounds }],
+      }),
+    ).toBeNull();
+  },
+);
+
+test.each(["not-a-date", "2026-02-30", "2026-2-01"])(
+  "invalid release date %s is skipped",
+  (release_date) => {
+    expect(
+      normalizeModel("p", "m", {
+        ...rawModel(fixtureCatalog, "openai", "gpt-5-mini"),
+        release_date,
+      }),
+    ).toBeNull();
+  },
+);
+
+test.each([
+  { cost: { input: 1, output: 2, cache_read: null } },
+  { cost: { input: 1, output: 2, context_over_200k: "bad" } },
+  { experimental: { modes: { fast: { cost: "bad" } } } },
+  { experimental: { modes: { fast: { cost: { tiers: "bad" } } } } },
+])("malformed optional pricing rejects the model, case %#", (patch) => {
+  expect(
+    normalizeModel("p", "m", { ...rawModel(fixtureCatalog, "openai", "gpt-5-mini"), ...patch }),
+  ).toBeNull();
 });

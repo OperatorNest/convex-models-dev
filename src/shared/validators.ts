@@ -1,7 +1,23 @@
 import { v, type Infer } from "convex/values";
-import { modelsDevErrorValidator } from "./errors.js";
+import { MODELS_DEV_ERROR_CODES } from "./errors.js";
 
-export const priceFieldsValidator = v.object({
+export const modelsDevErrorValidator = v.object({
+  code: v.union(...MODELS_DEV_ERROR_CODES.map((code) => v.literal(code))),
+  message: v.string(),
+  retryable: v.optional(v.boolean()),
+  providerStatus: v.optional(v.number()),
+  providerCode: v.optional(v.string()),
+});
+
+export const modelStatusValidator = v.union(
+  v.literal("alpha"),
+  v.literal("beta"),
+  v.literal("deprecated"),
+);
+/** Names the catalog maturity or retirement state of a model. */
+export type ModelStatus = Infer<typeof modelStatusValidator>;
+
+export const costFieldsValidator = v.object({
   input: v.optional(v.number()),
   output: v.optional(v.number()),
   cacheRead: v.optional(v.number()),
@@ -11,15 +27,17 @@ export const priceFieldsValidator = v.object({
   outputAudio: v.optional(v.number()),
 });
 
-export type PriceFields = Infer<typeof priceFieldsValidator>;
+/** Contains USD rates per million tokens for each catalog token category. */
+export type CostFields = Infer<typeof costFieldsValidator>;
 
-export const tierValidator = v.object({ size: v.number(), ...priceFieldsValidator.fields });
-export type PriceTier = Infer<typeof tierValidator>;
+export const tierValidator = v.object({ size: v.number(), ...costFieldsValidator.fields });
+/** Contains catalog token rates above a context-token threshold. */
+export type CostTier = Infer<typeof tierValidator>;
 
 export const modesValidator = v.record(
   v.string(),
   v.object({
-    cost: v.optional(priceFieldsValidator),
+    cost: v.optional(costFieldsValidator),
     tiers: v.optional(v.array(tierValidator)),
   }),
 );
@@ -39,16 +57,16 @@ export const reasoningOptionValidator = v.union(
 
 export const interleavedValidator = v.union(v.literal(true), v.object({ field: v.string() }));
 
-export const providerOverrideValidator = v.object({
+export const providerValidator = v.object({
   npm: v.optional(v.string()),
   api: v.optional(v.string()),
   shape: v.optional(v.string()),
 });
 
 export const modelFields = {
-  providerId: v.string(),
-  modelId: v.string(),
-  canonicalModelId: v.optional(v.string()),
+  modelsDevProviderId: v.string(),
+  modelsDevModelId: v.string(),
+  modelsDevCanonicalModelId: v.optional(v.string()),
   name: v.string(),
   family: v.optional(v.string()),
   description: v.optional(v.string()),
@@ -60,15 +78,15 @@ export const modelFields = {
   structuredOutput: v.optional(v.boolean()),
   temperature: v.optional(v.boolean()),
   openWeights: v.boolean(),
-  status: v.optional(v.string()),
+  status: v.optional(modelStatusValidator),
   inputMask: v.number(),
   outputMask: v.number(),
   reasoningOptions: v.optional(v.array(reasoningOptionValidator)),
   interleaved: v.optional(interleavedValidator),
 
-  contextLimit: v.number(),
-  outputLimit: v.number(),
-  inputLimit: v.optional(v.number()),
+  context: v.number(),
+  output: v.number(),
+  input: v.optional(v.number()),
 
   releaseDate: v.string(),
   lastUpdated: v.string(),
@@ -86,17 +104,19 @@ export const modelFields = {
   costOrder: v.number(),
   tiers: v.optional(v.array(tierValidator)),
   modes: v.optional(modesValidator),
-  providerOverride: v.optional(providerOverrideValidator),
+  provider: v.optional(providerValidator),
 };
 
 const modelRowValidator = v.object(modelFields);
+/** Contains normalized models.dev model fields and derived query fields. */
 export type ModelRow = Infer<typeof modelRowValidator>;
 
 export const modelInputValidator = v.object({ ...modelFields, contentHash: v.string() });
+/** Contains a normalized catalog model and its content hash. */
 export type ModelInput = Infer<typeof modelInputValidator>;
 
 export const providerFields = {
-  providerId: v.string(),
+  modelsDevProviderId: v.string(),
   name: v.string(),
   npm: v.optional(v.string()),
   env: v.array(v.string()),
@@ -106,16 +126,19 @@ export const providerFields = {
 };
 
 const providerRowValidator = v.object(providerFields);
+/** Contains normalized models.dev provider metadata. */
 export type ProviderRow = Infer<typeof providerRowValidator>;
 
 export const providerInputValidator = v.object({ ...providerFields, contentHash: v.string() });
+/** Contains normalized provider metadata and its content hash. */
 export type ProviderInput = Infer<typeof providerInputValidator>;
 
 export const pricingSnapshotValidator = v.object({
-  ...priceFieldsValidator.fields,
+  ...costFieldsValidator.fields,
   tiers: v.optional(v.array(tierValidator)),
   modes: v.optional(modesValidator),
 });
+/** Contains the token rates, context tiers and pricing modes recorded for a model. */
 export type PricingSnapshot = Infer<typeof pricingSnapshotValidator>;
 
 export const priceChangeKindValidator = v.union(
@@ -151,6 +174,7 @@ export const costBreakdownValidator = v.object({
   reasoning: v.number(),
   outputAudio: v.number(),
 });
+/** Contains estimated USD cost for each token category. */
 export type CostBreakdown = Infer<typeof costBreakdownValidator>;
 
 export const costEstimateValidator = v.union(
@@ -168,7 +192,9 @@ export const costEstimateValidator = v.union(
   }),
 );
 
+/** Contains a safe token cost estimate or declares pricing unknown. */
 export type CostEstimate = Infer<typeof costEstimateValidator>;
+/** Contains reported token counts for model cost estimation. */
 export type UsageInput = Infer<typeof usageValidator>;
 
 export const lastStatusValidator = v.union(
@@ -199,6 +225,7 @@ export const syncSourceErrorValidator = v.object({
   source: v.union(v.literal("primary"), v.literal("fallback")),
   ...modelsDevErrorValidator.fields,
 });
+/** Contains a fixed diagnostic for one attempted catalog source. */
 export type SyncSourceError = Infer<typeof syncSourceErrorValidator>;
 
 export const syncStatusValidator = v.object({
@@ -214,15 +241,40 @@ export const syncStatusValidator = v.object({
   ...syncCountsFields,
   durationMs: v.number(),
 });
+/** Contains the recorded catalog sync state, counters and diagnostics. */
 export type SyncStatus = Infer<typeof syncStatusValidator>;
+
+export const syncSkipReasonValidator = v.union(
+  v.literal("disabled"),
+  v.literal("min_interval"),
+  v.literal("already_running"),
+);
+/** Names the condition that prevented a catalog sync from starting. */
+export type SyncSkipReason = Infer<typeof syncSkipReasonValidator>;
 
 export const syncSummaryValidator = v.object({
   status: v.union(lastStatusValidator, v.literal("skipped")),
-  reason: v.optional(v.string()),
+  reason: v.optional(syncSkipReasonValidator),
   errors: v.array(syncSourceErrorValidator),
-  error: v.optional(modelsDevErrorValidator),
   source: v.optional(v.string()),
   durationMs: v.optional(v.number()),
   ...v.object(syncCountsFields).partial().fields,
 });
+/** Contains the outcome, counters and ordered diagnostics of a catalog sync invocation. */
 export type SyncSummary = Infer<typeof syncSummaryValidator>;
+
+/** Names the outcome of a completed catalog sync attempt. */
+export type SyncRunStatus = Infer<typeof lastStatusValidator>;
+/** Names the state derived from the last completed catalog sync. */
+export type SyncState = Infer<typeof syncStateValidator>;
+/** Names the outcome of a catalog sync invocation, including a skipped attempt. */
+export type SyncSummaryStatus = SyncSummary["status"];
+/** Names the catalog history event recorded for a model. */
+export type PriceChangeKind = Infer<typeof priceChangeKindValidator>;
+
+export const inputTokenScopeValidator = v.union(
+  v.literal("includesCache"),
+  v.literal("excludesCache"),
+);
+/** Specifies whether reported input tokens include cache reads and writes. */
+export type InputTokenScope = Infer<typeof inputTokenScopeValidator>;

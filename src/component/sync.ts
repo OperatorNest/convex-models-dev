@@ -23,6 +23,7 @@ import {
   syncStatusValidator,
   syncSourceErrorValidator,
   syncSummaryValidator,
+  syncSkipReasonValidator,
   type PricingSnapshot,
   type SyncStatus,
 } from "../shared/validators.js";
@@ -32,7 +33,7 @@ const LEASE_MS = 3 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const CRON_TOLERANCE_MS = 5 * 60 * 1000;
 
-export const status = query({
+export const getStatus = query({
   args: {},
   returns: syncStatusValidator,
   handler: async (ctx): Promise<SyncStatus> => {
@@ -74,10 +75,16 @@ export const status = query({
   },
 });
 
-export const syncNow = action({
-  args: { force: v.optional(v.boolean()) },
+export const run = action({
+  args: {},
   returns: syncSummaryValidator,
-  handler: (ctx, { force }) => runSync(ctx, { force: force ?? false, cron: false }),
+  handler: (ctx) => runSync(ctx, { force: false, cron: false }),
+});
+
+export const runForced = action({
+  args: {},
+  returns: syncSummaryValidator,
+  handler: (ctx) => runSync(ctx, { force: true, cron: false }),
 });
 
 export const tick = internalAction({
@@ -95,7 +102,7 @@ export const tick = internalAction({
 });
 
 const beginResult = v.union(
-  v.object({ proceed: v.literal(false), reason: v.string() }),
+  v.object({ proceed: v.literal(false), reason: syncSkipReasonValidator }),
   v.object({
     proceed: v.literal(true),
     config: effectiveConfigValidator,
@@ -116,15 +123,15 @@ export const begin = internalMutation({
   handler: async (ctx, { runId, force, cron }) => {
     const now = Date.now();
     const config = await loadConfig(ctx);
-    if (cron && !config.enabled) return { proceed: false as const, reason: "disabled" };
+    if (cron && !config.enabled) return { proceed: false as const, reason: "disabled" as const };
 
     const row = await ctx.db.query("syncState").first();
     if (row?.running && (row.leaseExpiresAt ?? 0) > now) {
-      return { proceed: false as const, reason: "already_running" };
+      return { proceed: false as const, reason: "already_running" as const };
     }
     const floorMs = config.minIntervalMinutes * 60 * 1000 - (cron ? CRON_TOLERANCE_MS : 0);
     if (!force && row && row.lastCheckedAt > 0 && now - row.lastCheckedAt < floorMs) {
-      return { proceed: false as const, reason: "min_interval" };
+      return { proceed: false as const, reason: "min_interval" as const };
     }
 
     const lease = { running: true, runId, leaseExpiresAt: now + LEASE_MS };
@@ -182,7 +189,9 @@ export const upsertProviders = internalMutation({
     for (const provider of providers) {
       const existing = await ctx.db
         .query("providers")
-        .withIndex("by_providerId", (q) => q.eq("providerId", provider.providerId))
+        .withIndex("by_modelsDevProviderId", (q) =>
+          q.eq("modelsDevProviderId", provider.modelsDevProviderId),
+        )
         .first();
       if (!existing) await ctx.db.insert("providers", { ...provider, updatedAt: now });
       else if (existing.contentHash !== provider.contentHash) {
@@ -224,8 +233,10 @@ export const upsertModels = internalMutation({
     for (const row of rows) {
       const existing = await ctx.db
         .query("models")
-        .withIndex("by_providerId_and_modelId", (q) =>
-          q.eq("providerId", row.providerId).eq("modelId", row.modelId),
+        .withIndex("by_modelsDevProviderId_and_modelsDevModelId", (q) =>
+          q
+            .eq("modelsDevProviderId", row.modelsDevProviderId)
+            .eq("modelsDevModelId", row.modelsDevModelId),
         )
         .first();
       if (!existing) {
@@ -234,9 +245,9 @@ export const upsertModels = internalMutation({
         const listed = pricingOf(row);
         if (recordAdded) {
           await ctx.db.insert("priceChanges", {
-            providerId: row.providerId,
-            modelId: row.modelId,
-            at: now,
+            modelsDevProviderId: row.modelsDevProviderId,
+            modelsDevModelId: row.modelsDevModelId,
+            changedAt: now,
             kind: "added",
             ...(listed && { after: listed }),
           });
@@ -257,9 +268,9 @@ export const upsertModels = internalMutation({
             ? "tiers"
             : "price";
         await ctx.db.insert("priceChanges", {
-          providerId: row.providerId,
-          modelId: row.modelId,
-          at: now,
+          modelsDevProviderId: row.modelsDevProviderId,
+          modelsDevModelId: row.modelsDevModelId,
+          changedAt: now,
           kind,
           ...(before && { before }),
           ...(after && { after }),
@@ -281,22 +292,22 @@ export const modelKeysPage = internalQuery({
   args: { cursor: v.union(v.string(), v.null()), numItems: v.number() },
   returns: paginationResultValidator(
     v.object({
-      id: v.id("models"),
-      providerId: v.string(),
-      modelId: v.string(),
+      modelId: v.id("models"),
+      modelsDevProviderId: v.string(),
+      modelsDevModelId: v.string(),
       hasCost: v.boolean(),
     }),
   ),
   handler: async (ctx, { cursor, numItems }) => {
     const result = await paginator(ctx.db, schema)
       .query("models")
-      .withIndex("by_providerId_and_modelId")
+      .withIndex("by_modelsDevProviderId_and_modelsDevModelId")
       .paginate(boundedPage({ cursor, numItems }));
     return {
       page: result.page.map((m) => ({
-        id: m._id,
-        providerId: m.providerId,
-        modelId: m.modelId,
+        modelId: m._id,
+        modelsDevProviderId: m.modelsDevProviderId,
+        modelsDevModelId: m.modelsDevModelId,
         hasCost: m.hasCost,
       })),
       isDone: result.isDone,
@@ -307,14 +318,19 @@ export const modelKeysPage = internalQuery({
 
 export const providerKeysPage = internalQuery({
   args: { cursor: v.union(v.string(), v.null()), numItems: v.number() },
-  returns: paginationResultValidator(v.object({ id: v.id("providers"), providerId: v.string() })),
+  returns: paginationResultValidator(
+    v.object({ providerId: v.id("providers"), modelsDevProviderId: v.string() }),
+  ),
   handler: async (ctx, { cursor, numItems }) => {
     const result = await paginator(ctx.db, schema)
       .query("providers")
-      .withIndex("by_providerId")
+      .withIndex("by_modelsDevProviderId")
       .paginate(boundedPage({ cursor, numItems }));
     return {
-      page: result.page.map((p) => ({ id: p._id, providerId: p.providerId })),
+      page: result.page.map((p) => ({
+        providerId: p._id,
+        modelsDevProviderId: p.modelsDevProviderId,
+      })),
       isDone: result.isDone,
       continueCursor: result.continueCursor,
     };
@@ -322,24 +338,24 @@ export const providerKeysPage = internalQuery({
 });
 
 export const removeModels = internalMutation({
-  args: { runId: v.string(), ids: v.array(v.id("models")) },
+  args: { runId: v.string(), modelIds: v.array(v.id("models")) },
   returns: v.object({ leaseLost: v.boolean(), removed: v.number() }),
-  handler: async (ctx, { runId, ids }) => {
+  handler: async (ctx, { runId, modelIds }) => {
     if (!(await holdLease(ctx, runId))) return { leaseLost: true, removed: 0 };
     const now = Date.now();
     let removed = 0;
-    for (const id of ids) {
-      const row = await ctx.db.get("models", id);
+    for (const modelId of modelIds) {
+      const row = await ctx.db.get("models", modelId);
       if (!row) continue;
       const before = pricingOf(row);
       await ctx.db.insert("priceChanges", {
-        providerId: row.providerId,
-        modelId: row.modelId,
-        at: now,
+        modelsDevProviderId: row.modelsDevProviderId,
+        modelsDevModelId: row.modelsDevModelId,
+        changedAt: now,
         kind: "removed",
         ...(before && { before }),
       });
-      await ctx.db.delete("models", id);
+      await ctx.db.delete("models", modelId);
       removed++;
     }
     return { leaseLost: false, removed };
@@ -347,11 +363,11 @@ export const removeModels = internalMutation({
 });
 
 export const removeProviders = internalMutation({
-  args: { runId: v.string(), ids: v.array(v.id("providers")) },
+  args: { runId: v.string(), providerIds: v.array(v.id("providers")) },
   returns: v.object({ leaseLost: v.boolean() }),
-  handler: async (ctx, { runId, ids }) => {
+  handler: async (ctx, { runId, providerIds }) => {
     if (!(await holdLease(ctx, runId))) return { leaseLost: true };
-    for (const id of ids) await ctx.db.delete("providers", id);
+    for (const providerId of providerIds) await ctx.db.delete("providers", providerId);
     return { leaseLost: false };
   },
 });
@@ -423,7 +439,7 @@ export const cleanupPriceChanges = internalMutation({
     const cutoff = Date.now() - config.retentionDays * DAY_MS;
     const rows = await ctx.db
       .query("priceChanges")
-      .withIndex("by_at", (q) => q.lt("at", cutoff))
+      .withIndex("by_changedAt", (q) => q.lt("changedAt", cutoff))
       .take(500);
     for (const row of rows) await ctx.db.delete("priceChanges", row._id);
     return rows.length;

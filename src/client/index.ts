@@ -8,14 +8,14 @@ import type {
   PaginationOptions,
 } from "convex/server";
 import type { ComponentApi } from "../component/_generated/component.js";
-export { isModelsDevError } from "../shared/errors.js";
+export { MODELS_DEV_ERROR_CODES, isModelsDevError } from "../shared/errors.js";
 import type { UsageInput } from "../shared/validators.js";
 
-export { estimateCost, usageFromAgent } from "../shared/cost.js";
+export { estimateCost, extractUsage } from "../shared/cost.js";
 export type { CostModel, EstimateCostOptions } from "../shared/cost.js";
 export {
   DEFAULT_PROVIDER_ALIASES,
-  providerCandidates,
+  listProviderCandidates,
   resolveModel,
   splitModelKey,
 } from "../shared/resolve.js";
@@ -25,64 +25,95 @@ export {
   syncSummaryValidator,
   type CostBreakdown,
   type CostEstimate,
-  type PriceFields,
-  type PriceTier,
+  type CostFields,
+  type CostTier,
+  type InputTokenScope,
+  type ModelStatus,
+  type SyncRunStatus,
+  type SyncState,
+  type SyncSummaryStatus,
+  type SyncSkipReason,
+  type PriceChangeKind,
   type SyncStatus,
   type SyncSummary,
   type SyncSourceError,
   type UsageInput,
 } from "../shared/validators.js";
 
-type QueryCtx = Pick<GenericQueryCtx<GenericDataModel>, "runQuery">;
-type MutationCtx = Pick<GenericMutationCtx<GenericDataModel>, "runMutation">;
-type ActionCtx = Pick<GenericActionCtx<GenericDataModel>, "runAction">;
+/** Supplies the query runner used to read stored catalog rows. */
+export type QueryContext = Pick<GenericQueryCtx<GenericDataModel>, "runQuery">;
+/** Supplies the mutation runner used to update catalog configuration. */
+export type MutationContext = Pick<GenericMutationCtx<GenericDataModel>, "runMutation">;
+/** Supplies the action runner used to synchronize the catalog. */
+export type ActionContext = Pick<GenericActionCtx<GenericDataModel>, "runAction">;
 
+/** Configures provider aliases for catalog model resolution. */
 export type ModelsDevOptions = {
   aliases?: Record<string, string>;
 };
 
+/** Selects stored models and bounds a catalog page. */
 export type ListModelsArgs = Omit<
   FunctionArgs<ComponentApi["models"]["list"]>,
   "paginationOpts"
 > & { paginationOpts: PaginationOptions };
 
-export type CheapestResult = FunctionReturnType<ComponentApi["models"]["cheapest"]>;
+/** Contains price-ranked catalog models and whether the scan completed. */
+export type CheapestResult = FunctionReturnType<ComponentApi["models"]["listCheapest"]>;
 
-export type EstimateCostArgs = Omit<FunctionArgs<ComponentApi["models"]["estimate"]>, "usage"> & {
+/** Selects a stored model and supplies token usage with explicit pricing choices. */
+export type EstimateCostArgs = Omit<
+  FunctionArgs<ComponentApi["models"]["estimateCost"]>,
+  "usage"
+> & {
   usage: UsageInput;
 };
 
+/** Provides aggregate operations over the stored models.dev catalog. */
 export class ModelsDev {
   readonly models;
   readonly providers;
   readonly sync;
   readonly config;
 
+  /** Binds catalog aggregate operations to the installed component and provider aliases. */
   constructor(
     public readonly component: ComponentApi,
     options: ModelsDevOptions = {},
   ) {
     const { models, providers, sync, config } = component;
-    const aliases = (overrides: Record<string, string> | undefined) =>
-      options.aliases ? { ...options.aliases, ...overrides } : overrides;
+    const aliases = (overrides: Record<string, string> | undefined) => {
+      if (!options.aliases) return overrides;
+      return Object.fromEntries([
+        ...Object.entries(options.aliases),
+        ...Object.entries(overrides ?? {}),
+      ]);
+    };
 
     this.models = {
-      get: (ctx: QueryCtx, args: FunctionArgs<typeof models.get>) =>
-        ctx.runQuery(models.get, { providerId: args.providerId, modelId: args.modelId }),
+      /** Reads the stored catalog row for the supplied catalog identity. */
+      get: (ctx: QueryContext, args: FunctionArgs<typeof models.get>) =>
+        ctx.runQuery(models.get, {
+          modelsDevProviderId: args.modelsDevProviderId,
+          modelsDevModelId: args.modelsDevModelId,
+        }),
 
-      getByKey: (ctx: QueryCtx, args: FunctionArgs<typeof models.getByKey>) =>
+      /** Reads a stored model by its provider-qualified catalog key. */
+      getByKey: (ctx: QueryContext, args: FunctionArgs<typeof models.getByKey>) =>
         ctx.runQuery(models.getByKey, { key: args.key }),
 
-      resolve: (ctx: QueryCtx, args: FunctionArgs<typeof models.resolve>) =>
+      /** Reads a stored model after resolving provider aliases. */
+      resolve: (ctx: QueryContext, args: FunctionArgs<typeof models.resolve>) =>
         ctx.runQuery(models.resolve, {
           provider: args.provider,
           model: args.model,
           aliases: aliases(args.aliases),
         }),
 
-      list: (ctx: QueryCtx, args: ListModelsArgs) =>
+      /** Lists stored catalog rows within the declared read bounds. */
+      list: (ctx: QueryContext, args: ListModelsArgs) =>
         ctx.runQuery(models.list, {
-          providerId: args.providerId,
+          modelsDevProviderId: args.modelsDevProviderId,
           family: args.family,
           status: args.status,
           reasoning: args.reasoning,
@@ -91,7 +122,7 @@ export class ModelsDev {
           openWeights: args.openWeights,
           inputModalities: args.inputModalities,
           outputModalities: args.outputModalities,
-          minContext: args.minContext,
+          minContextTokens: args.minContextTokens,
           maxCostInput: args.maxCostInput,
           includeDeprecated: args.includeDeprecated,
           order: args.order,
@@ -104,47 +135,52 @@ export class ModelsDev {
           },
         }),
 
-      search: (ctx: QueryCtx, args: FunctionArgs<typeof models.search>) =>
+      /** Searches stored model names and catalog identifiers. */
+      search: (ctx: QueryContext, args: FunctionArgs<typeof models.search>) =>
         ctx.runQuery(models.search, {
           query: args.query,
-          providerId: args.providerId,
+          modelsDevProviderId: args.modelsDevProviderId,
           family: args.family,
           limit: args.limit,
         }),
 
-      cheapest: (
-        ctx: QueryCtx,
-        args: FunctionArgs<typeof models.cheapest> = {},
+      /** Lists the cheapest stored models matching the capability filters. */
+      listCheapest: (
+        ctx: QueryContext,
+        args: FunctionArgs<typeof models.listCheapest> = {},
       ): Promise<CheapestResult> =>
-        ctx.runQuery(models.cheapest, {
-          minContext: args.minContext,
-          minOutput: args.minOutput,
+        ctx.runQuery(models.listCheapest, {
+          minContextTokens: args.minContextTokens,
+          minOutputTokens: args.minOutputTokens,
           reasoning: args.reasoning,
           toolCall: args.toolCall,
           structuredOutput: args.structuredOutput,
           inputModalities: args.inputModalities,
-          providerIds: args.providerIds,
+          modelsDevProviderIds: args.modelsDevProviderIds,
           excludeFree: args.excludeFree,
           excludeDeprecated: args.excludeDeprecated,
           distinctCanonical: args.distinctCanonical,
           limit: args.limit,
         }),
 
-      equivalents: (ctx: QueryCtx, args: FunctionArgs<typeof models.equivalents>) =>
-        ctx.runQuery(models.equivalents, {
-          canonicalModelId: args.canonicalModelId,
+      /** Lists stored offerings of the same canonical model in price order. */
+      listEquivalents: (ctx: QueryContext, args: FunctionArgs<typeof models.listEquivalents>) =>
+        ctx.runQuery(models.listEquivalents, {
+          modelsDevCanonicalModelId: args.modelsDevCanonicalModelId,
           limit: args.limit,
         }),
 
-      priceHistory: (ctx: QueryCtx, args: FunctionArgs<typeof models.priceHistory>) =>
-        ctx.runQuery(models.priceHistory, {
-          providerId: args.providerId,
-          modelId: args.modelId,
+      /** Lists the stored price changes for a catalog model. */
+      listPriceChanges: (ctx: QueryContext, args: FunctionArgs<typeof models.listPriceChanges>) =>
+        ctx.runQuery(models.listPriceChanges, {
+          modelsDevProviderId: args.modelsDevProviderId,
+          modelsDevModelId: args.modelsDevModelId,
           limit: args.limit,
         }),
 
-      estimateCost: (ctx: QueryCtx, args: EstimateCostArgs) =>
-        ctx.runQuery(models.estimate, {
+      /** Estimates token cost using a stored model and explicit input counting semantics. */
+      estimateCost: (ctx: QueryContext, args: EstimateCostArgs) =>
+        ctx.runQuery(models.estimateCost, {
           provider: args.provider,
           model: args.model,
           usage: {
@@ -164,29 +200,36 @@ export class ModelsDev {
             outputAudioTokens: args.usage.outputAudioTokens,
           },
           mode: args.mode,
-          inputIncludesCache: args.inputIncludesCache,
+          inputTokenScope: args.inputTokenScope,
           aliases: aliases(args.aliases),
         }),
     };
 
     this.providers = {
-      list: (ctx: QueryCtx) => ctx.runQuery(providers.list, {}),
-      get: (ctx: QueryCtx, args: FunctionArgs<typeof providers.get>) =>
-        ctx.runQuery(providers.get, { providerId: args.providerId }),
+      /** Lists stored catalog rows within the declared read bounds. */
+      list: (ctx: QueryContext) => ctx.runQuery(providers.list, {}),
+      /** Reads the stored catalog row for the supplied catalog identity. */
+      get: (ctx: QueryContext, args: FunctionArgs<typeof providers.get>) =>
+        ctx.runQuery(providers.get, { modelsDevProviderId: args.modelsDevProviderId }),
     };
 
     this.sync = {
-      now: (ctx: ActionCtx, args: FunctionArgs<typeof sync.syncNow> = {}) =>
-        ctx.runAction(sync.syncNow, { force: args.force }),
+      /** Synchronizes the catalog while enforcing interval and catalog-loss guards. */
+      run: (ctx: ActionContext) => ctx.runAction(sync.run, {}),
+      /** Synchronizes the catalog while bypassing interval and catalog-loss guards. */
+      runForced: (ctx: ActionContext) => ctx.runAction(sync.runForced, {}),
 
-      status: (ctx: QueryCtx) => ctx.runQuery(sync.status, {}),
+      /** Reads the recorded catalog sync state and ordered source diagnostics. */
+      getStatus: (ctx: QueryContext) => ctx.runQuery(sync.getStatus, {}),
     };
 
     this.config = {
-      get: (ctx: QueryCtx) => ctx.runQuery(config.get, {}),
+      /** Reads the stored catalog row for the supplied catalog identity. */
+      get: (ctx: QueryContext) => ctx.runQuery(config.get, {}),
 
-      update: (ctx: MutationCtx, args: FunctionArgs<typeof config.configure>) =>
-        ctx.runMutation(config.configure, {
+      /** Updates supplied catalog sync settings while retaining omitted settings. */
+      update: (ctx: MutationContext, args: FunctionArgs<typeof config.update>) =>
+        ctx.runMutation(config.update, {
           enabled: args.enabled,
           sourceUrl: args.sourceUrl,
           minIntervalMinutes: args.minIntervalMinutes,

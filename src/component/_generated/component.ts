@@ -24,7 +24,21 @@ import type { FunctionReference } from "convex/server";
 export type ComponentApi<Name extends string | undefined = string | undefined> =
   {
     config: {
-      configure: FunctionReference<
+      get: FunctionReference<
+        "query",
+        "internal",
+        {},
+        {
+          enabled: boolean;
+          minIntervalMinutes: number;
+          minModels: number;
+          minProviders: number;
+          retentionDays: number;
+          sourceUrl: string;
+        },
+        Name
+      >;
+      update: FunctionReference<
         "mutation",
         "internal",
         {
@@ -45,216 +59,15 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         },
         Name
       >;
-      get: FunctionReference<
-        "query",
-        "internal",
-        {},
-        {
-          enabled: boolean;
-          minIntervalMinutes: number;
-          minModels: number;
-          minProviders: number;
-          retentionDays: number;
-          sourceUrl: string;
-        },
-        Name
-      >;
     };
     models: {
-      cheapest: FunctionReference<
-        "query",
-        "internal",
-        {
-          distinctCanonical?: boolean;
-          excludeDeprecated?: boolean;
-          excludeFree?: boolean;
-          inputModalities?: Array<string>;
-          limit?: number;
-          minContext?: number;
-          minOutput?: number;
-          providerIds?: Array<string>;
-          reasoning?: boolean;
-          structuredOutput?: boolean;
-          toolCall?: boolean;
-        },
-        {
-          isComplete: boolean;
-          models: Array<{
-            _creationTime: number;
-            _id: string;
-            attachment: boolean;
-            canonicalModelId?: string;
-            contentHash: string;
-            contextLimit: number;
-            costBlended?: number;
-            costCacheRead?: number;
-            costCacheWrite?: number;
-            costInput?: number;
-            costInputAudio?: number;
-            costOrder: number;
-            costOutput?: number;
-            costOutputAudio?: number;
-            costReasoning?: number;
-            description?: string;
-            family?: string;
-            firstSeenAt: number;
-            hasCost: boolean;
-            inputLimit?: number;
-            inputMask: number;
-            interleaved?: true | { field: string };
-            knowledge?: string;
-            lastUpdated: string;
-            modelId: string;
-            modes?: Record<
-              string,
-              {
-                cost?: {
-                  cacheRead?: number;
-                  cacheWrite?: number;
-                  input?: number;
-                  inputAudio?: number;
-                  output?: number;
-                  outputAudio?: number;
-                  reasoning?: number;
-                };
-                tiers?: Array<{
-                  cacheRead?: number;
-                  cacheWrite?: number;
-                  input?: number;
-                  inputAudio?: number;
-                  output?: number;
-                  outputAudio?: number;
-                  reasoning?: number;
-                  size: number;
-                }>;
-              }
-            >;
-            name: string;
-            openWeights: boolean;
-            outputLimit: number;
-            outputMask: number;
-            providerId: string;
-            providerOverride?: { api?: string; npm?: string; shape?: string };
-            reasoning: boolean;
-            reasoningOptions?: Array<
-              | { type: "toggle" }
-              | { type: "effort"; values: Array<null | string> }
-              | { max?: number; min?: number; type: "budget_tokens" }
-            >;
-            releaseDate: string;
-            searchText: string;
-            status?: string;
-            structuredOutput?: boolean;
-            temperature?: boolean;
-            tiers?: Array<{
-              cacheRead?: number;
-              cacheWrite?: number;
-              input?: number;
-              inputAudio?: number;
-              output?: number;
-              outputAudio?: number;
-              reasoning?: number;
-              size: number;
-            }>;
-            toolCall: boolean;
-            updatedAt: number;
-          }>;
-        },
-        Name
-      >;
-      equivalents: FunctionReference<
-        "query",
-        "internal",
-        { canonicalModelId: string; limit?: number },
-        Array<{
-          _creationTime: number;
-          _id: string;
-          attachment: boolean;
-          canonicalModelId?: string;
-          contentHash: string;
-          contextLimit: number;
-          costBlended?: number;
-          costCacheRead?: number;
-          costCacheWrite?: number;
-          costInput?: number;
-          costInputAudio?: number;
-          costOrder: number;
-          costOutput?: number;
-          costOutputAudio?: number;
-          costReasoning?: number;
-          description?: string;
-          family?: string;
-          firstSeenAt: number;
-          hasCost: boolean;
-          inputLimit?: number;
-          inputMask: number;
-          interleaved?: true | { field: string };
-          knowledge?: string;
-          lastUpdated: string;
-          modelId: string;
-          modes?: Record<
-            string,
-            {
-              cost?: {
-                cacheRead?: number;
-                cacheWrite?: number;
-                input?: number;
-                inputAudio?: number;
-                output?: number;
-                outputAudio?: number;
-                reasoning?: number;
-              };
-              tiers?: Array<{
-                cacheRead?: number;
-                cacheWrite?: number;
-                input?: number;
-                inputAudio?: number;
-                output?: number;
-                outputAudio?: number;
-                reasoning?: number;
-                size: number;
-              }>;
-            }
-          >;
-          name: string;
-          openWeights: boolean;
-          outputLimit: number;
-          outputMask: number;
-          providerId: string;
-          providerOverride?: { api?: string; npm?: string; shape?: string };
-          reasoning: boolean;
-          reasoningOptions?: Array<
-            | { type: "toggle" }
-            | { type: "effort"; values: Array<null | string> }
-            | { max?: number; min?: number; type: "budget_tokens" }
-          >;
-          releaseDate: string;
-          searchText: string;
-          status?: string;
-          structuredOutput?: boolean;
-          temperature?: boolean;
-          tiers?: Array<{
-            cacheRead?: number;
-            cacheWrite?: number;
-            input?: number;
-            inputAudio?: number;
-            output?: number;
-            outputAudio?: number;
-            reasoning?: number;
-            size: number;
-          }>;
-          toolCall: boolean;
-          updatedAt: number;
-        }>,
-        Name
-      >;
-      estimate: FunctionReference<
+      estimateCost: FunctionReference<
         "query",
         "internal",
         {
           aliases?: Record<string, string>;
-          inputIncludesCache?: boolean;
-          mode?: string;
+          inputTokenScope: "includesCache" | "excludesCache";
+          mode: string | null;
           model: string;
           provider: string;
           usage: {
@@ -298,14 +111,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       get: FunctionReference<
         "query",
         "internal",
-        { modelId: string; providerId: string },
+        { modelsDevModelId: string; modelsDevProviderId: string },
         {
           _creationTime: number;
           _id: string;
           attachment: boolean;
-          canonicalModelId?: string;
           contentHash: string;
-          contextLimit: number;
+          context: number;
           costBlended?: number;
           costCacheRead?: number;
           costCacheWrite?: number;
@@ -319,12 +131,14 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           family?: string;
           firstSeenAt: number;
           hasCost: boolean;
-          inputLimit?: number;
+          input?: number;
           inputMask: number;
           interleaved?: true | { field: string };
           knowledge?: string;
           lastUpdated: string;
-          modelId: string;
+          modelsDevCanonicalModelId?: string;
+          modelsDevModelId: string;
+          modelsDevProviderId: string;
           modes?: Record<
             string,
             {
@@ -351,10 +165,9 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           >;
           name: string;
           openWeights: boolean;
-          outputLimit: number;
+          output: number;
           outputMask: number;
-          providerId: string;
-          providerOverride?: { api?: string; npm?: string; shape?: string };
+          provider?: { api?: string; npm?: string; shape?: string };
           reasoning: boolean;
           reasoningOptions?: Array<
             | { type: "toggle" }
@@ -363,7 +176,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           >;
           releaseDate: string;
           searchText: string;
-          status?: string;
+          status?: "alpha" | "beta" | "deprecated";
           structuredOutput?: boolean;
           temperature?: boolean;
           tiers?: Array<{
@@ -389,9 +202,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           _creationTime: number;
           _id: string;
           attachment: boolean;
-          canonicalModelId?: string;
           contentHash: string;
-          contextLimit: number;
+          context: number;
           costBlended?: number;
           costCacheRead?: number;
           costCacheWrite?: number;
@@ -405,12 +217,14 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           family?: string;
           firstSeenAt: number;
           hasCost: boolean;
-          inputLimit?: number;
+          input?: number;
           inputMask: number;
           interleaved?: true | { field: string };
           knowledge?: string;
           lastUpdated: string;
-          modelId: string;
+          modelsDevCanonicalModelId?: string;
+          modelsDevModelId: string;
+          modelsDevProviderId: string;
           modes?: Record<
             string,
             {
@@ -437,10 +251,9 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           >;
           name: string;
           openWeights: boolean;
-          outputLimit: number;
+          output: number;
           outputMask: number;
-          providerId: string;
-          providerOverride?: { api?: string; npm?: string; shape?: string };
+          provider?: { api?: string; npm?: string; shape?: string };
           reasoning: boolean;
           reasoningOptions?: Array<
             | { type: "toggle" }
@@ -449,7 +262,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           >;
           releaseDate: string;
           searchText: string;
-          status?: string;
+          status?: "alpha" | "beta" | "deprecated";
           structuredOutput?: boolean;
           temperature?: boolean;
           tiers?: Array<{
@@ -475,7 +288,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           includeDeprecated?: boolean;
           inputModalities?: Array<string>;
           maxCostInput?: number;
-          minContext?: number;
+          minContextTokens?: number;
+          modelsDevProviderId?: string;
           openWeights?: boolean;
           order?: "release" | "context" | "cost";
           outputModalities?: Array<string>;
@@ -487,9 +301,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             maximumRowsRead?: number;
             numItems: number;
           };
-          providerId?: string;
           reasoning?: boolean;
-          status?: string;
+          status?: "alpha" | "beta" | "deprecated";
           structuredOutput?: boolean;
           toolCall?: boolean;
         },
@@ -500,9 +313,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             _creationTime: number;
             _id: string;
             attachment: boolean;
-            canonicalModelId?: string;
             contentHash: string;
-            contextLimit: number;
+            context: number;
             costBlended?: number;
             costCacheRead?: number;
             costCacheWrite?: number;
@@ -516,12 +328,14 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             family?: string;
             firstSeenAt: number;
             hasCost: boolean;
-            inputLimit?: number;
+            input?: number;
             inputMask: number;
             interleaved?: true | { field: string };
             knowledge?: string;
             lastUpdated: string;
-            modelId: string;
+            modelsDevCanonicalModelId?: string;
+            modelsDevModelId: string;
+            modelsDevProviderId: string;
             modes?: Record<
               string,
               {
@@ -548,10 +362,9 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             >;
             name: string;
             openWeights: boolean;
-            outputLimit: number;
+            output: number;
             outputMask: number;
-            providerId: string;
-            providerOverride?: { api?: string; npm?: string; shape?: string };
+            provider?: { api?: string; npm?: string; shape?: string };
             reasoning: boolean;
             reasoningOptions?: Array<
               | { type: "toggle" }
@@ -560,7 +373,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             >;
             releaseDate: string;
             searchText: string;
-            status?: string;
+            status?: "alpha" | "beta" | "deprecated";
             structuredOutput?: boolean;
             temperature?: boolean;
             tiers?: Array<{
@@ -581,10 +394,201 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         },
         Name
       >;
-      priceHistory: FunctionReference<
+      listCheapest: FunctionReference<
         "query",
         "internal",
-        { limit?: number; modelId: string; providerId: string },
+        {
+          distinctCanonical?: boolean;
+          excludeDeprecated?: boolean;
+          excludeFree?: boolean;
+          inputModalities?: Array<string>;
+          limit?: number;
+          minContextTokens?: number;
+          minOutputTokens?: number;
+          modelsDevProviderIds?: Array<string>;
+          reasoning?: boolean;
+          structuredOutput?: boolean;
+          toolCall?: boolean;
+        },
+        {
+          isComplete: boolean;
+          models: Array<{
+            _creationTime: number;
+            _id: string;
+            attachment: boolean;
+            contentHash: string;
+            context: number;
+            costBlended?: number;
+            costCacheRead?: number;
+            costCacheWrite?: number;
+            costInput?: number;
+            costInputAudio?: number;
+            costOrder: number;
+            costOutput?: number;
+            costOutputAudio?: number;
+            costReasoning?: number;
+            description?: string;
+            family?: string;
+            firstSeenAt: number;
+            hasCost: boolean;
+            input?: number;
+            inputMask: number;
+            interleaved?: true | { field: string };
+            knowledge?: string;
+            lastUpdated: string;
+            modelsDevCanonicalModelId?: string;
+            modelsDevModelId: string;
+            modelsDevProviderId: string;
+            modes?: Record<
+              string,
+              {
+                cost?: {
+                  cacheRead?: number;
+                  cacheWrite?: number;
+                  input?: number;
+                  inputAudio?: number;
+                  output?: number;
+                  outputAudio?: number;
+                  reasoning?: number;
+                };
+                tiers?: Array<{
+                  cacheRead?: number;
+                  cacheWrite?: number;
+                  input?: number;
+                  inputAudio?: number;
+                  output?: number;
+                  outputAudio?: number;
+                  reasoning?: number;
+                  size: number;
+                }>;
+              }
+            >;
+            name: string;
+            openWeights: boolean;
+            output: number;
+            outputMask: number;
+            provider?: { api?: string; npm?: string; shape?: string };
+            reasoning: boolean;
+            reasoningOptions?: Array<
+              | { type: "toggle" }
+              | { type: "effort"; values: Array<null | string> }
+              | { max?: number; min?: number; type: "budget_tokens" }
+            >;
+            releaseDate: string;
+            searchText: string;
+            status?: "alpha" | "beta" | "deprecated";
+            structuredOutput?: boolean;
+            temperature?: boolean;
+            tiers?: Array<{
+              cacheRead?: number;
+              cacheWrite?: number;
+              input?: number;
+              inputAudio?: number;
+              output?: number;
+              outputAudio?: number;
+              reasoning?: number;
+              size: number;
+            }>;
+            toolCall: boolean;
+            updatedAt: number;
+          }>;
+        },
+        Name
+      >;
+      listEquivalents: FunctionReference<
+        "query",
+        "internal",
+        { limit?: number; modelsDevCanonicalModelId: string },
+        Array<{
+          _creationTime: number;
+          _id: string;
+          attachment: boolean;
+          contentHash: string;
+          context: number;
+          costBlended?: number;
+          costCacheRead?: number;
+          costCacheWrite?: number;
+          costInput?: number;
+          costInputAudio?: number;
+          costOrder: number;
+          costOutput?: number;
+          costOutputAudio?: number;
+          costReasoning?: number;
+          description?: string;
+          family?: string;
+          firstSeenAt: number;
+          hasCost: boolean;
+          input?: number;
+          inputMask: number;
+          interleaved?: true | { field: string };
+          knowledge?: string;
+          lastUpdated: string;
+          modelsDevCanonicalModelId?: string;
+          modelsDevModelId: string;
+          modelsDevProviderId: string;
+          modes?: Record<
+            string,
+            {
+              cost?: {
+                cacheRead?: number;
+                cacheWrite?: number;
+                input?: number;
+                inputAudio?: number;
+                output?: number;
+                outputAudio?: number;
+                reasoning?: number;
+              };
+              tiers?: Array<{
+                cacheRead?: number;
+                cacheWrite?: number;
+                input?: number;
+                inputAudio?: number;
+                output?: number;
+                outputAudio?: number;
+                reasoning?: number;
+                size: number;
+              }>;
+            }
+          >;
+          name: string;
+          openWeights: boolean;
+          output: number;
+          outputMask: number;
+          provider?: { api?: string; npm?: string; shape?: string };
+          reasoning: boolean;
+          reasoningOptions?: Array<
+            | { type: "toggle" }
+            | { type: "effort"; values: Array<null | string> }
+            | { max?: number; min?: number; type: "budget_tokens" }
+          >;
+          releaseDate: string;
+          searchText: string;
+          status?: "alpha" | "beta" | "deprecated";
+          structuredOutput?: boolean;
+          temperature?: boolean;
+          tiers?: Array<{
+            cacheRead?: number;
+            cacheWrite?: number;
+            input?: number;
+            inputAudio?: number;
+            output?: number;
+            outputAudio?: number;
+            reasoning?: number;
+            size: number;
+          }>;
+          toolCall: boolean;
+          updatedAt: number;
+        }>,
+        Name
+      >;
+      listPriceChanges: FunctionReference<
+        "query",
+        "internal",
+        {
+          limit?: number;
+          modelsDevModelId: string;
+          modelsDevProviderId: string;
+        },
         Array<{
           _creationTime: number;
           _id: string;
@@ -631,7 +635,6 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
               size: number;
             }>;
           };
-          at: number;
           before?: {
             cacheRead?: number;
             cacheWrite?: number;
@@ -675,9 +678,10 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
               size: number;
             }>;
           };
+          changedAt: number;
           kind: "added" | "removed" | "price" | "tiers";
-          modelId: string;
-          providerId: string;
+          modelsDevModelId: string;
+          modelsDevProviderId: string;
         }>,
         Name
       >;
@@ -689,9 +693,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           _creationTime: number;
           _id: string;
           attachment: boolean;
-          canonicalModelId?: string;
           contentHash: string;
-          contextLimit: number;
+          context: number;
           costBlended?: number;
           costCacheRead?: number;
           costCacheWrite?: number;
@@ -705,12 +708,14 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           family?: string;
           firstSeenAt: number;
           hasCost: boolean;
-          inputLimit?: number;
+          input?: number;
           inputMask: number;
           interleaved?: true | { field: string };
           knowledge?: string;
           lastUpdated: string;
-          modelId: string;
+          modelsDevCanonicalModelId?: string;
+          modelsDevModelId: string;
+          modelsDevProviderId: string;
           modes?: Record<
             string,
             {
@@ -737,10 +742,9 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           >;
           name: string;
           openWeights: boolean;
-          outputLimit: number;
+          output: number;
           outputMask: number;
-          providerId: string;
-          providerOverride?: { api?: string; npm?: string; shape?: string };
+          provider?: { api?: string; npm?: string; shape?: string };
           reasoning: boolean;
           reasoningOptions?: Array<
             | { type: "toggle" }
@@ -749,7 +753,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           >;
           releaseDate: string;
           searchText: string;
-          status?: string;
+          status?: "alpha" | "beta" | "deprecated";
           structuredOutput?: boolean;
           temperature?: boolean;
           tiers?: Array<{
@@ -770,14 +774,18 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       search: FunctionReference<
         "query",
         "internal",
-        { family?: string; limit?: number; providerId?: string; query: string },
+        {
+          family?: string;
+          limit?: number;
+          modelsDevProviderId?: string;
+          query: string;
+        },
         Array<{
           _creationTime: number;
           _id: string;
           attachment: boolean;
-          canonicalModelId?: string;
           contentHash: string;
-          contextLimit: number;
+          context: number;
           costBlended?: number;
           costCacheRead?: number;
           costCacheWrite?: number;
@@ -791,12 +799,14 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           family?: string;
           firstSeenAt: number;
           hasCost: boolean;
-          inputLimit?: number;
+          input?: number;
           inputMask: number;
           interleaved?: true | { field: string };
           knowledge?: string;
           lastUpdated: string;
-          modelId: string;
+          modelsDevCanonicalModelId?: string;
+          modelsDevModelId: string;
+          modelsDevProviderId: string;
           modes?: Record<
             string,
             {
@@ -823,10 +833,9 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           >;
           name: string;
           openWeights: boolean;
-          outputLimit: number;
+          output: number;
           outputMask: number;
-          providerId: string;
-          providerOverride?: { api?: string; npm?: string; shape?: string };
+          provider?: { api?: string; npm?: string; shape?: string };
           reasoning: boolean;
           reasoningOptions?: Array<
             | { type: "toggle" }
@@ -835,7 +844,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           >;
           releaseDate: string;
           searchText: string;
-          status?: string;
+          status?: "alpha" | "beta" | "deprecated";
           structuredOutput?: boolean;
           temperature?: boolean;
           tiers?: Array<{
@@ -858,7 +867,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       get: FunctionReference<
         "query",
         "internal",
-        { providerId: string },
+        { modelsDevProviderId: string },
         {
           _creationTime: number;
           _id: string;
@@ -867,9 +876,9 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           doc?: string;
           env: Array<string>;
           modelCount: number;
+          modelsDevProviderId: string;
           name: string;
           npm?: string;
-          providerId: string;
           updatedAt: number;
         } | null,
         Name
@@ -886,16 +895,16 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           doc?: string;
           env: Array<string>;
           modelCount: number;
+          modelsDevProviderId: string;
           name: string;
           npm?: string;
-          providerId: string;
           updatedAt: number;
         }>,
         Name
       >;
     };
     sync: {
-      status: FunctionReference<
+      getStatus: FunctionReference<
         "query",
         "internal",
         {},
@@ -904,17 +913,18 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           durationMs: number;
           errors: Array<{
             code:
-              | "MODELS_DEV_INVALID_CONFIG"
-              | "MODELS_DEV_INVALID_SOURCE_URL"
               | "MODELS_DEV_INVALID_ARGUMENT"
-              | "MODELS_DEV_INVALID_CATALOG"
+              | "MODELS_DEV_PROVIDER_ERROR"
+              | "MODELS_DEV_NETWORK_ERROR"
+              | "MODELS_DEV_INVALID_RESPONSE"
               | "MODELS_DEV_CATALOG_TOO_SMALL"
               | "MODELS_DEV_CATALOG_TOO_LARGE"
-              | "MODELS_DEV_FETCH_FAILED"
               | "MODELS_DEV_SYNC_FAILED"
               | "MODELS_DEV_LEASE_LOST";
             message: string;
+            providerCode?: string;
             providerStatus?: number;
+            retryable?: boolean;
             source: "primary" | "fallback";
           }>;
           lastCheckedAt?: number;
@@ -934,46 +944,69 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         },
         Name
       >;
-      syncNow: FunctionReference<
+      run: FunctionReference<
         "action",
         "internal",
-        { force?: boolean },
+        {},
         {
           added?: number;
           durationMs?: number;
-          error?: {
-            code:
-              | "MODELS_DEV_INVALID_CONFIG"
-              | "MODELS_DEV_INVALID_SOURCE_URL"
-              | "MODELS_DEV_INVALID_ARGUMENT"
-              | "MODELS_DEV_INVALID_CATALOG"
-              | "MODELS_DEV_CATALOG_TOO_SMALL"
-              | "MODELS_DEV_CATALOG_TOO_LARGE"
-              | "MODELS_DEV_FETCH_FAILED"
-              | "MODELS_DEV_SYNC_FAILED"
-              | "MODELS_DEV_LEASE_LOST";
-            message: string;
-            providerStatus?: number;
-          };
           errors: Array<{
             code:
-              | "MODELS_DEV_INVALID_CONFIG"
-              | "MODELS_DEV_INVALID_SOURCE_URL"
               | "MODELS_DEV_INVALID_ARGUMENT"
-              | "MODELS_DEV_INVALID_CATALOG"
+              | "MODELS_DEV_PROVIDER_ERROR"
+              | "MODELS_DEV_NETWORK_ERROR"
+              | "MODELS_DEV_INVALID_RESPONSE"
               | "MODELS_DEV_CATALOG_TOO_SMALL"
               | "MODELS_DEV_CATALOG_TOO_LARGE"
-              | "MODELS_DEV_FETCH_FAILED"
               | "MODELS_DEV_SYNC_FAILED"
               | "MODELS_DEV_LEASE_LOST";
             message: string;
+            providerCode?: string;
             providerStatus?: number;
+            retryable?: boolean;
             source: "primary" | "fallback";
           }>;
           modelCount?: number;
           priceChanges?: number;
           providerCount?: number;
-          reason?: string;
+          reason?: "disabled" | "min_interval" | "already_running";
+          removalSkipped?: boolean;
+          removed?: number;
+          skippedModels?: number;
+          source?: string;
+          status: "ok" | "not_modified" | "partial" | "error" | "skipped";
+          updated?: number;
+        },
+        Name
+      >;
+      runForced: FunctionReference<
+        "action",
+        "internal",
+        {},
+        {
+          added?: number;
+          durationMs?: number;
+          errors: Array<{
+            code:
+              | "MODELS_DEV_INVALID_ARGUMENT"
+              | "MODELS_DEV_PROVIDER_ERROR"
+              | "MODELS_DEV_NETWORK_ERROR"
+              | "MODELS_DEV_INVALID_RESPONSE"
+              | "MODELS_DEV_CATALOG_TOO_SMALL"
+              | "MODELS_DEV_CATALOG_TOO_LARGE"
+              | "MODELS_DEV_SYNC_FAILED"
+              | "MODELS_DEV_LEASE_LOST";
+            message: string;
+            providerCode?: string;
+            providerStatus?: number;
+            retryable?: boolean;
+            source: "primary" | "fallback";
+          }>;
+          modelCount?: number;
+          priceChanges?: number;
+          providerCount?: number;
+          reason?: "disabled" | "min_interval" | "already_running";
           removalSkipped?: boolean;
           removed?: number;
           skippedModels?: number;
