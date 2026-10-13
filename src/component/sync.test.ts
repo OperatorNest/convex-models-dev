@@ -1378,40 +1378,6 @@ test("a content-length above 8 MiB is rejected before reading", async () => {
   expect(pulls).toBeLessThanOrEqual(2);
 });
 
-test("a catalog at live size syncs every provider and model", { timeout: 120_000 }, async () => {
-  const t = setupTest();
-  const liveProviderCount = 228;
-  const liveModelCount = 8773;
-  const template = rawModel(fixtureCatalog, "openai", "gpt-5.4");
-  const catalog: Record<string, { name: string; models: Record<string, RawModel> }> = {};
-  for (let p = 0; p < liveProviderCount; p++) {
-    const modelCount =
-      Math.floor(liveModelCount / liveProviderCount) +
-      (p < liveModelCount % liveProviderCount ? 1 : 0);
-    catalog[`provider-${p}`] = {
-      name: `Provider ${p}`,
-      models: Object.fromEntries(
-        Array.from({ length: modelCount }, (_, m) => [
-          `model-${m}`,
-          { ...template, id: `model-${m}`, name: `Model ${p}-${m}` },
-        ]),
-      ),
-    };
-  }
-  const body = JSON.stringify(catalog);
-  stubFetch(() => new Response(body, { headers: { "content-length": String(body.length) } }));
-  expect(await sync(t)).toMatchObject({
-    status: "ok",
-    providerCount: liveProviderCount,
-    modelCount: liveModelCount,
-    added: liveModelCount,
-  });
-  expect(await t.run((ctx) => ctx.db.query("models").take(10_000))).toHaveLength(liveModelCount);
-  expect(await t.run((ctx) => ctx.db.query("providers").take(1000))).toHaveLength(
-    liveProviderCount,
-  );
-});
-
 test("a provider row counts only its usable models", async () => {
   const t = setupTest();
   await relaxGuards(t);

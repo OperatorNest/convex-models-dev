@@ -8,8 +8,9 @@ import ts from "typescript";
 import { assertSmoke, errorCodeOf, runSmoke, smokeEnv, step, waitFor } from "./smoke-harness.mjs";
 
 const root = resolve(import.meta.dirname, "..");
-const GENERATED_PROVIDER_COUNT = 50;
-const GENERATED_MODELS_PER_PROVIDER = 20;
+// With the fixture this reaches the live models.dev catalog size of 228 providers and 8773 models, so the real backend proves a live-size sync fits its transaction limits.
+const GENERATED_PROVIDER_COUNT = 220;
+const GENERATED_MODELS_PER_PROVIDER = 40;
 const LIVE_SOURCE_URLS = ["https://models.dev/api.json", "https://models.opencode.ai/api.json"];
 const DEPLOYED_CONFIG_PATHS = ["src/component/config.ts", "dist/component/config.js"];
 
