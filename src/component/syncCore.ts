@@ -130,7 +130,7 @@ async function loadCatalog(
       await response.body?.cancel();
       throw modelsDevError("MODELS_DEV_PROVIDER_ERROR", {
         providerStatus: response.status,
-        retryable: response.status === 429 || response.status >= 500,
+        retryable: response.status === 408 || response.status === 429 || response.status >= 500,
       });
     }
     const responseEtag = response.headers.get("etag");

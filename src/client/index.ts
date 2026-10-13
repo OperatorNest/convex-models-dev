@@ -204,8 +204,15 @@ export class ModelsDev {
 
   /** Reads stored models.dev providers. */
   readonly providers = {
-    /** Lists stored providers, at most 500. */
-    list: (ctx: QueryContext) => ctx.runQuery(this.component.providers.list, {}),
+    /** Lists stored providers within the declared read bounds, ordered by catalog provider ID. */
+    list: (ctx: QueryContext, args: { paginationOpts: PaginationOptions }) =>
+      ctx.runQuery(this.component.providers.list, {
+        paginationOpts: {
+          numItems: args.paginationOpts.numItems,
+          cursor: args.paginationOpts.cursor,
+          endCursor: args.paginationOpts.endCursor,
+        },
+      }),
     /** Reads one stored provider by models.dev provider ID. */
     get: (ctx: QueryContext, args: FunctionArgs<ComponentApi["providers"]["get"]>) =>
       ctx.runQuery(this.component.providers.get, { modelsDevProviderId: args.modelsDevProviderId }),

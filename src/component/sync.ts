@@ -293,7 +293,7 @@ export const modelKeysPage = internalQuery({
     const result = await paginator(ctx.db, schema)
       .query("models")
       .withIndex("by_modelsDevProviderId_and_modelsDevModelId")
-      .paginate(boundedPage({ cursor, numItems }));
+      .paginate(boundedPage({ cursor, numItems }, 4));
     return {
       page: result.page.map((m) => ({
         modelId: m._id,
@@ -316,7 +316,7 @@ export const providerKeysPage = internalQuery({
     const result = await paginator(ctx.db, schema)
       .query("providers")
       .withIndex("by_modelsDevProviderId")
-      .paginate(boundedPage({ cursor, numItems }));
+      .paginate(boundedPage({ cursor, numItems }, 3));
     return {
       page: result.page.map((p) => ({
         providerId: p._id,

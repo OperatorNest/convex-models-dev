@@ -888,20 +888,35 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       list: FunctionReference<
         "query",
         "internal",
-        {},
-        Array<{
-          _creationTime: number;
-          _id: string;
-          api?: string;
-          contentHash: string;
-          doc?: string;
-          env: Array<string>;
-          modelCount: number;
-          modelsDevProviderId: string;
-          name: string;
-          npm?: string;
-          updatedAt: number;
-        }>,
+        {
+          paginationOpts: {
+            cursor: string | null;
+            endCursor?: string | null;
+            id?: number;
+            maximumBytesRead?: number;
+            maximumRowsRead?: number;
+            numItems: number;
+          };
+        },
+        {
+          continueCursor: string;
+          isDone: boolean;
+          page: Array<{
+            _creationTime: number;
+            _id: string;
+            api?: string;
+            contentHash: string;
+            doc?: string;
+            env: Array<string>;
+            modelCount: number;
+            modelsDevProviderId: string;
+            name: string;
+            npm?: string;
+            updatedAt: number;
+          }>;
+          pageStatus?: "SplitRecommended" | "SplitRequired" | null;
+          splitCursor?: string | null;
+        },
         Name
       >;
     };

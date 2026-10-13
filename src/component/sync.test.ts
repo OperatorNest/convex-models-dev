@@ -58,7 +58,9 @@ describe("first sync, 200 then 304", () => {
     const status = await t.query(api.sync.getStatus, {});
     expect(status.state).toBe("never_synced");
     expect(status.running).toBe(false);
-    expect(await t.query(api.providers.list, {})).toEqual([]);
+    expect(
+      (await t.query(api.providers.list, { paginationOpts: { numItems: 100, cursor: null } })).page,
+    ).toEqual([]);
     expect(
       await t.query(api.models.get, { modelsDevProviderId: "openai", modelsDevModelId: "gpt-5.4" }),
     ).toBeNull();
@@ -85,7 +87,9 @@ describe("first sync, 200 then 304", () => {
     expect(new Headers(server.calls[0]?.init.headers).get("if-none-match")).toBeNull();
 
     expect(await models(t)).toHaveLength(FIXTURE_MODEL_COUNT);
-    expect(await t.query(api.providers.list, {})).toHaveLength(FIXTURE_PROVIDER_COUNT);
+    expect(
+      (await t.query(api.providers.list, { paginationOpts: { numItems: 100, cursor: null } })).page,
+    ).toHaveLength(FIXTURE_PROVIDER_COUNT);
     const row = await state(t);
     expect(row).toMatchObject({ etag: '"etag-1"', lastStatus: "ok", running: false });
     expect(row?.contentHash).toMatch(/^[0-9a-f]{64}$/);
@@ -323,7 +327,9 @@ describe("removal guard", () => {
       modelCount: loadedModelCount,
     });
     expect(await models(t)).toHaveLength(FIXTURE_MODEL_COUNT);
-    expect(await t.query(api.providers.list, {})).toHaveLength(FIXTURE_PROVIDER_COUNT);
+    expect(
+      (await t.query(api.providers.list, { paginationOpts: { numItems: 100, cursor: null } })).page,
+    ).toHaveLength(FIXTURE_PROVIDER_COUNT);
 
     expect(await state(t)).toMatchObject({
       partialReason: "removal",
@@ -349,7 +355,9 @@ describe("removal guard", () => {
     expect(forced.removed).toBeGreaterThan(0);
     expect((await models(t)).some((m) => m.modelsDevProviderId === "azure")).toBe(false);
     expect(
-      (await t.query(api.providers.list, {})).map((p) => p.modelsDevProviderId).toSorted(),
+      (await t.query(api.providers.list, { paginationOpts: { numItems: 100, cursor: null } })).page
+        .map((p) => p.modelsDevProviderId)
+        .toSorted(),
     ).toEqual(["anthropic", "deepinfra", "google", "novita-ai", "nvidia", "openai"]);
   });
 
@@ -704,7 +712,9 @@ describe("lease fencing", () => {
     const result = await sync(t);
     expect(result).toMatchObject({ status: "error", errors: [{ code: "MODELS_DEV_LEASE_LOST" }] });
     expect(await models(t)).toHaveLength(0);
-    expect(await t.query(api.providers.list, {})).toHaveLength(0);
+    expect(
+      (await t.query(api.providers.list, { paginationOpts: { numItems: 100, cursor: null } })).page,
+    ).toHaveLength(0);
     expect(await state(t)).toMatchObject({ runId: "thief", running: true });
     expect(server.calls.length).toBeGreaterThan(0);
   });
@@ -1414,4 +1424,46 @@ test("a provider row counts only its usable models", async () => {
   expect(await t.query(api.providers.get, { modelsDevProviderId: "anthropic" })).toMatchObject({
     modelCount: Object.keys(modelsOf(fixtureCatalog, "anthropic")).length - 1,
   });
+});
+
+test.each([400, 401, 403, 404, 408, 409, 422, 429, 500, 503, 599])(
+  "catalog read HTTP %s records retryability on both sources",
+  async (status) => {
+    const t = setup();
+    await relaxGuards(t);
+    stubFetch(() => new Response("refused", { status }));
+    const result = await sync(t);
+    const retryable = status === 408 || status === 429 || status >= 500;
+    expect(
+      result.errors.map((error) => [error.code, error.providerStatus, error.retryable]),
+    ).toEqual([
+      ["MODELS_DEV_PROVIDER_ERROR", status, retryable],
+      ["MODELS_DEV_PROVIDER_ERROR", status, retryable],
+    ]);
+    expect((await t.query(api.sync.getStatus, {})).errors).toEqual(result.errors);
+  },
+);
+
+test("catalog read abort records a retryable network timeout", async () => {
+  const t = setup();
+  await relaxGuards(t);
+  stubFetch(() => {
+    throw new DOMException("aborted", "AbortError");
+  });
+  const result = await sync(t);
+  expect(result.errors.map((error) => [error.code, error.retryable])).toEqual([
+    ["MODELS_DEV_NETWORK_ERROR", true],
+    ["MODELS_DEV_NETWORK_ERROR", true],
+  ]);
+});
+
+test.each([200, 302])("invalid catalog responses do not carry retryable", async (status) => {
+  const t = setup();
+  await relaxGuards(t);
+  stubFetch(() => new Response("not JSON", { status }));
+  const result = await sync(t);
+  expect(result.errors.map((error) => [error.code, error.retryable])).toEqual([
+    ["MODELS_DEV_INVALID_RESPONSE", undefined],
+    ["MODELS_DEV_INVALID_RESPONSE", undefined],
+  ]);
 });

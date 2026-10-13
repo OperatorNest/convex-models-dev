@@ -90,8 +90,15 @@ describe("every public client method", () => {
   test("stored providers can be listed and read by catalog identity", async () => {
     const { t, client } = await synced();
     await t.run(async (ctx) => {
-      const providers = await client.providers.list(ctx);
-      expect(providers.map((p) => p.modelsDevProviderId)).toContain("openai");
+      const providers = await client.providers.list(ctx, {
+        paginationOpts: { numItems: 2, cursor: null },
+      });
+      expect(providers.page).toHaveLength(2);
+      expect(providers.isDone).toBe(false);
+      const remaining = await client.providers.list(ctx, {
+        paginationOpts: { numItems: 100, cursor: providers.continueCursor },
+      });
+      expect(remaining.page.map((p) => p.modelsDevProviderId)).toContain("openai");
       expect(await client.providers.get(ctx, { modelsDevProviderId: "openai" })).toMatchObject({
         name: "OpenAI",
       });
@@ -219,6 +226,20 @@ test("client copies declared arguments and nested options", async () => {
       (
         await client.models.list(ctx, {
           paginationOpts: { numItems: 1, cursor: null, ...extra },
+          ...extra,
+        })
+      ).page,
+    ).toHaveLength(1);
+    expect(
+      (
+        await client.providers.list(ctx, {
+          paginationOpts: {
+            numItems: 1,
+            cursor: null,
+            maximumRowsRead: 0,
+            maximumBytesRead: 0,
+            ...extra,
+          },
           ...extra,
         })
       ).page,

@@ -1,3 +1,4 @@
+import type { FunctionReturnType } from "convex/server";
 import { listCheapest } from "./models.js";
 import { afterEach, expect, test, vi, describe } from "vitest";
 import { api, internal } from "./_generated/api.js";
@@ -21,7 +22,7 @@ import {
   FIXTURE_PROVIDER_COUNT,
   type Catalog,
 } from "../fixtures/index.js";
-import { normalizeModel } from "../shared/normalize.js";
+import { normalizeModel, normalizeProvider } from "../shared/normalize.js";
 import { estimateCost } from "../shared/cost.js";
 
 async function syncedCatalog(mutate?: (c: Catalog) => void) {
@@ -111,7 +112,9 @@ describe("get, getByKey, resolve", () => {
 describe("providers", () => {
   test("list and get", async () => {
     const t = await syncedCatalog();
-    const providers = await t.query(api.providers.list, {});
+    const providers = (
+      await t.query(api.providers.list, { paginationOpts: { numItems: 100, cursor: null } })
+    ).page;
     expect(providers.map((p) => p.modelsDevProviderId).toSorted()).toEqual([
       "anthropic",
       "azure",
@@ -994,4 +997,76 @@ test("listCheapest deduplicates provider IDs and rejects more than 64", async ()
     }),
     "MODELS_DEV_INVALID_ARGUMENT",
   );
+});
+
+test("providers.list pages large accepted provider rows without losing or duplicating providers", async () => {
+  const t = setupTest();
+  await t.run(async (ctx) => {
+    for (let index = 0; index < 360; index++) {
+      const modelsDevProviderId = String(index).padStart(3, "0");
+      const row = required(
+        normalizeProvider(
+          modelsDevProviderId,
+          {
+            env: Array.from({ length: 4 }, () => "x".repeat(15_000)),
+          },
+          1,
+        ),
+        "normalized provider",
+      );
+      await ctx.db.insert("providers", { ...row, contentHash: "h", updatedAt: 0 });
+    }
+  });
+  const seen: string[] = [];
+  let cursor: string | null = null;
+  let isDone = false;
+  while (!isDone) {
+    const result: FunctionReturnType<typeof api.providers.list> = await t.query(
+      api.providers.list,
+      {
+        paginationOpts: { numItems: 100, cursor, maximumRowsRead: 1, maximumBytesRead: 1 },
+      },
+    );
+    if (!result.isDone) expect(result.page.length).toBeGreaterThan(0);
+    expect(result.page.length).toBeLessThan(100);
+    expect(result.page.reduce((bytes, row) => bytes + JSON.stringify(row).length, 0)).toBeLessThan(
+      1_048_576 + 65_536,
+    );
+    seen.push(...result.page.map((row) => row.modelsDevProviderId));
+    cursor = result.continueCursor;
+    isDone = result.isDone;
+  }
+  expect(seen).toEqual(Array.from({ length: 360 }, (_, index) => String(index).padStart(3, "0")));
+});
+
+test("providers.list rejects a cursor one value longer than its index key", async () => {
+  const t = setupTest();
+  for (const paginationOpts of [
+    { numItems: 1, cursor: '["a",0,"id",null]' },
+    { numItems: 1, cursor: null, endCursor: '["a",0,"id",null]' },
+  ]) {
+    await expectModelsDevError(
+      t.query(api.providers.list, { paginationOpts }),
+      "MODELS_DEV_INVALID_ARGUMENT",
+    );
+  }
+});
+
+test("models.list bounds cursors by every selected index key", async () => {
+  const t = setupTest();
+  for (const order of ["release", "context", "cost"] as const) {
+    for (const selection of [{}, { modelsDevProviderId: "openai" }, { family: "gpt" }]) {
+      const length = "modelsDevProviderId" in selection || "family" in selection ? 4 : 3;
+      const cursor = JSON.stringify(Array.from({ length: length + 1 }, () => null));
+      for (const paginationOpts of [
+        { numItems: 1, cursor },
+        { numItems: 1, cursor: null, endCursor: cursor },
+      ]) {
+        await expectModelsDevError(
+          t.query(api.models.list, { order, ...selection, paginationOpts }),
+          "MODELS_DEV_INVALID_ARGUMENT",
+        );
+      }
+    }
+  }
 });

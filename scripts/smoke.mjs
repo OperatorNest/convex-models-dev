@@ -372,6 +372,27 @@ async function journey(backend) {
         )) === "MODELS_DEV_INVALID_ARGUMENT",
         `cursor ${cursor.slice(0, 16)} accepted`,
       );
+    for (const method of ["models:list", "providers:list"]) {
+      const cursor = JSON.stringify([null, null, null, null]);
+      assertSmoke(
+        (await cliRejectionCode(component(method, { paginationOpts: { numItems: 1, cursor } }))) ===
+          "MODELS_DEV_INVALID_ARGUMENT",
+        method + " accepted a cursor longer than its index key",
+      );
+    }
+    const firstProviders = await component("providers:list", {
+      paginationOpts: { numItems: 2, cursor: null, maximumRowsRead: 1, maximumBytesRead: 1 },
+    });
+    const nextProviders = await component("providers:list", {
+      paginationOpts: { numItems: 2, cursor: firstProviders.continueCursor },
+    });
+    assertSmoke(
+      firstProviders.page.length === 2 &&
+        !firstProviders.isDone &&
+        nextProviders.page.length === 2 &&
+        firstProviders.page[1].modelsDevProviderId < nextProviders.page[0].modelsDevProviderId,
+      "provider pagination or read budgets differ",
+    );
     const pinned = await component("models:list", {
       includeDeprecated: true,
       paginationOpts: { numItems: 1, cursor: null, endCursor: "[]" },

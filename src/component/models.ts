@@ -126,7 +126,10 @@ export const list = query({
   returns: paginationResultValidator(modelDoc),
   handler: async (ctx, args) => {
     finiteBounds(args.minContextTokens, args.maxCostInput);
-    const pagination = boundedPage(args.paginationOpts);
+    const pagination = boundedPage(
+      args.paginationOpts,
+      args.modelsDevProviderId !== undefined || args.family !== undefined ? 4 : 3,
+    );
     const order = args.order ?? "release";
     const { modelsDevProviderId, family, minContextTokens } = args;
     const table = paginator(ctx.db, schema).query("models");

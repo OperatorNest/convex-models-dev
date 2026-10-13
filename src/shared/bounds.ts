@@ -54,8 +54,8 @@ export async function readBoundedText(
   );
 }
 
-/** Throws `MODELS_DEV_INVALID_ARGUMENT` unless `cursor` is well-formed, at most 4096 characters, and a JSON array of at most 16 primitive values whose strings are well-formed. */
-export function validateCursor(cursor: string): void {
+/** Throws `MODELS_DEV_INVALID_ARGUMENT` unless `cursor` is well-formed, at most 4096 characters, and a JSON array of at most `indexKeyLength` primitive values whose strings are well-formed. */
+export function validateCursor(cursor: string, indexKeyLength: number): void {
   const isBoundedText = cursor.length <= 4096 && cursor.isWellFormed();
   if (!isBoundedText) throw modelsDevError("MODELS_DEV_INVALID_ARGUMENT");
   let values: Value;
@@ -66,7 +66,7 @@ export function validateCursor(cursor: string): void {
   }
   if (
     !Array.isArray(values) ||
-    values.length > 16 ||
+    values.length > indexKeyLength ||
     !values.every(
       (value) =>
         value === null ||
@@ -80,12 +80,12 @@ export function validateCursor(cursor: string): void {
     throw modelsDevError("MODELS_DEV_INVALID_ARGUMENT");
 }
 
-/** Returns page options with `numItems` 1 to 100, validated `cursor` and `endCursor`, `maximumRowsRead` `numItems + 1` and `maximumBytesRead` 1048576; caller read budgets are ignored. */
-export function boundedPage(options: PaginationOptions): PaginationOptions {
+/** Returns page options with `numItems` 1 to 100, `cursor` and `endCursor` validated against `indexKeyLength` (the paginated index's declared fields plus `_creationTime` and `_id`), `maximumRowsRead` `numItems + 1` and `maximumBytesRead` 1048576; caller read budgets are ignored. */
+export function boundedPage(options: PaginationOptions, indexKeyLength: number): PaginationOptions {
   if (!Number.isSafeInteger(options.numItems) || options.numItems < 1 || options.numItems > 100)
     throw modelsDevError("MODELS_DEV_INVALID_ARGUMENT");
   for (const cursor of [options.cursor, options.endCursor])
-    if (cursor !== null && cursor !== undefined) validateCursor(cursor);
+    if (cursor !== null && cursor !== undefined) validateCursor(cursor, indexKeyLength);
   return {
     numItems: options.numItems,
     cursor: options.cursor,

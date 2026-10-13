@@ -21,8 +21,9 @@
 - Upgrade from 0.2.0: the stored `syncState` row and model rows written by 0.2.0 fail schema validation on push. Before upgrading, clear the component's `syncState` and `models` tables, or remove and re-add the component; after deploying, run `sync.runForced`.
 - Breaking: remove the `removalSkipped` sync counter; a skipped removal is reported only by `partialReason: "removal"`.
 - Breaking: list queries ignore caller `maximumRowsRead` and `maximumBytesRead`; each page reads at most `numItems + 1` rows and 1 MiB.
-- Breaking: list cursors longer than 4096 characters or holding more than 16 values throw `MODELS_DEV_INVALID_ARGUMENT`.
+- Breaking: list cursors longer than 4096 characters or holding more values than the selected index’s declared field count plus 2 throw `MODELS_DEV_INVALID_ARGUMENT`.
 - Breaking: `ModelsDev.component` is private; client pagination forwards only `numItems`, `cursor` and `endCursor`.
-- Provider and network errors always carry `retryable`; a network failure is `retryable: true`.
+- Provider and network errors always carry `retryable`: catalog reads classify network failures, timeouts and HTTP 408, 429 or 5xx as true; every other HTTP failure is false. Invalid responses carry no `retryable`.
 - Strings containing well-formed surrogate pairs are accepted; lone surrogates are still rejected.
 - Document `sync.run`, `sync.runForced` and `config.update` in the README API table, and document the client context types.
+- Breaking: `providers.list` requires `{ paginationOpts }` and returns `{ page, isDone, continueCursor }` with optional split metadata, ordered by provider ID. Provider pages share the 1–100 item, `numItems + 1` row and 1 MiB byte bounds of model pages; there is no 500-provider result cap.

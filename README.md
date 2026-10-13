@@ -102,7 +102,7 @@ Catalog terms follow the [models.dev schema](https://github.com/anomalyco/models
 | `partialReason`                                                                                                              | The catalog-loss guard that made a run `partial`: `price_loss` wrote no catalog rows; `removal` wrote rows and skipped deletion.                                                                                                                                                                                                                                                              |
 | sync summary `status`, `reason`                                                                                              | Last-status outcomes plus `skipped`; skipped reasons are `disabled`, `min_interval` and `already_running`.                                                                                                                                                                                                                                                                                    |
 | `running`, `leaseExpiresAt`, `lastCheckedAt`, `lastSyncedAt`, `durationMs`                                                   | Recorded lease flag, lease/check/sync timestamps in milliseconds since the Unix epoch and elapsed milliseconds.                                                                                                                                                                                                                                                                               |
-| `errors`, `source`, `code`, `message`, `retryable`, `providerStatus`, `providerCode`                                         | Ordered fixed errors, the diagnostic source of each (`primary` or `fallback`), retry eligibility and provider diagnostics.                                                                                                                                                                                                                                                                    |
+| `errors`, `source`, `code`, `message`, `retryable`, `providerStatus`, `providerCode`                                         | Ordered fixed errors, the diagnostic source of each (`primary` or `fallback`), whether repeating the identical catalog read is safe and worthwhile, and provider diagnostics.                                                                                                                                                                                                                 |
 | `added`, `updated`, `removed`, `priceChanges`, `skippedModels`                                                               | Sync row counters.                                                                                                                                                                                                                                                                                                                                                                            |
 | `kind`, `before`, `after`, `changedAt`                                                                                       | History event (`added`, `removed`, `price`, `tiers`), price snapshots and event timestamp in milliseconds since the Unix epoch.                                                                                                                                                                                                                                                               |
 | `enabled`, `sourceUrl`, `minIntervalMinutes`, `retentionDays`, `minProviders`, `minModels`                                   | Sync settings: cron enablement, catalog URL, minimum interval, history retention and usable-row floors. In sync status and summaries, `sourceUrl` is the catalog URL the run loaded.                                                                                                                                                                                                          |
@@ -175,7 +175,7 @@ Methods take `(ctx, args)`; methods without arguments take `ctx`. `QueryContext`
 | `models.listEquivalents`  | `QueryContext`    | `modelsDevCanonicalModelId`, `limit?`                                                            | Matching documents ordered by blended price, unpriced documents last; default and maximum 200.                     |
 | `models.listPriceChanges` | `QueryContext`    | `modelsDevProviderId`, `modelsDevModelId`, `limit?`                                              | History documents, newest first; default 50, maximum 200.                                                          |
 | `models.estimateCost`     | `QueryContext`    | `provider`, `model`, `usage`, `aliases?`, `mode`, `inputTokenScope`                              | `CostEstimate`.                                                                                                    |
-| `providers.list`          | `QueryContext`    | None                                                                                             | At most 500 provider documents, ordered by provider ID.                                                            |
+| `providers.list`          | `QueryContext`    | `paginationOpts`                                                                                 | Paginated provider documents, ordered by provider ID.                                                              |
 | `providers.get`           | `QueryContext`    | `modelsDevProviderId`                                                                            | Provider document or `null`.                                                                                       |
 | `sync.run`                | `ActionContext`   | None                                                                                             | `SyncSummary`; applies the interval, removal and price-loss guards.                                                |
 | `sync.runForced`          | `ActionContext`   | None                                                                                             | `SyncSummary`; bypasses the interval, removal and price-loss guards.                                               |
@@ -185,7 +185,7 @@ Methods take `(ctx, args)`; methods without arguments take `ctx`. `QueryContext`
 
 `models.list` filters are `modelsDevProviderId`, `family`, `status` (any string, matched exactly against the stored status), `reasoning`, `toolCall`, `structuredOutput`, `openWeights`, `inputModalities`, `outputModalities`, `minContextTokens`, `maxCostInput`, `type` (default: every type) and `includeDeprecated` (default `false`). `order` defaults to `release` (newest first); `context` orders largest first and `cost` orders cheapest first, excluding unpriced models. Provider and family filters select narrower indexes; other filters run during the scan.
 
-`paginationOpts.numItems` must be an integer from 1 through 100. Each call reads at most `numItems + 1` rows and targets at most 1 MiB of document bytes; caller `maximumRowsRead` and `maximumBytesRead` values are ignored. `cursor` and `endCursor` must be well-formed, at most 4096 characters and a JSON array of at most 16 primitive values. The document that reaches the byte limit is included. Filters can return short or empty pages: continue until `isDone`. `endCursor` pins a page interval. If a bound interrupts that interval, use the returned `pageStatus` and `splitCursor` to split it. Use `usePaginatedQuery` from `convex-helpers/react` for reactive pagination.
+`paginationOpts.numItems` must be an integer from 1 through 100. Each call reads at most `numItems + 1` rows and targets at most 1 MiB of document bytes; caller `maximumRowsRead` and `maximumBytesRead` values are ignored. `cursor` and `endCursor` must be well-formed, at most 4096 characters and a JSON array of at most the selected index’s declared field count plus 2 primitive values. Model indexes allow 3 values without a provider or family selection and 4 with either selection; the provider index allows 3. Shorter cursors remain valid prefix bounds. These bounds apply to both `models.list` and `providers.list`. The document that reaches the byte limit is included. Filters can return short or empty pages: continue until `isDone`. `endCursor` pins a page interval. If a bound interrupts that interval, use the returned `pageStatus` and `splitCursor` to split it. Use `usePaginatedQuery` from `convex-helpers/react` for reactive pagination.
 
 `models.listCheapest` filters are `minContextTokens`, `minOutputTokens`, `reasoning`, `toolCall`, `structuredOutput`, `inputModalities`, `modelsDevProviderIds` (1 to 64 distinct IDs after deduplication; an empty array or more than 64 IDs throw `MODELS_DEV_INVALID_ARGUMENT`; omit it to select every provider), `type` (default: every type), `excludeFree` (default `false`), `excludeDeprecated` (default `true`) and `distinctCanonical` (default `false`). Ranking uses `(3 × input + output) / 4` USD per million tokens. It merges provider-and-cost index ranges when `modelsDevProviderIds` is supplied; otherwise it reads the cost index. A shared scan bound permits at most 1927 priced rows, including ties, so a scan of 4 KiB model rows reads at most half of Convex's 16 MiB per-query read limit. The result is `{ models, isComplete }`; `isComplete` is false if the scan bound stops the read before `limit` matches. A complete short result means the selected ranges were exhausted.
 
@@ -195,18 +195,18 @@ Pure named exports are `estimateCost`, `extractUsage`, `resolveModel`, `splitMod
 
 ## Errors
 
-Thrown errors are `ConvexError<ModelsDevErrorData>`. `isModelsDevError` checks the code, its fixed message and optional diagnostics. Provider and network errors alone carry `retryable`; HTTP failures carry `providerStatus`. Sync summaries and stored sync status contain one ordered `errors` array, including failed source attempts before successful fallback. Error messages exclude response content and caller values.
+Thrown errors are `ConvexError<ModelsDevErrorData>`. `isModelsDevError` checks the code, its fixed message and optional diagnostics. Provider and network errors alone carry `retryable`; HTTP failures carry `providerStatus`. Catalog requests are reads: network failures, timeouts and HTTP 408, 429 or 5xx are `retryable: true`; every other HTTP failure is `false`. Invalid or unexpected responses use `MODELS_DEV_INVALID_RESPONSE` and carry no `retryable`. Sync summaries and stored sync status contain one ordered `errors` array, including failed source attempts before successful fallback. Error messages exclude response content and caller values.
 
-| Code                           | Message                                                           | When                                                           |
-| ------------------------------ | ----------------------------------------------------------------- | -------------------------------------------------------------- |
-| `MODELS_DEV_INVALID_ARGUMENT`  | An argument is missing, malformed or out of bounds.               | Invalid query, usage or table-backed configuration arguments.  |
-| `MODELS_DEV_PROVIDER_ERROR`    | The catalog provider returned a failure response.                 | An HTTP response has a failure status.                         |
-| `MODELS_DEV_NETWORK_ERROR`     | The request to models.dev failed before a response arrived.       | Fetch or a body read throws or times out.                      |
-| `MODELS_DEV_INVALID_RESPONSE`  | The catalog response is malformed.                                | A 3xx response, or a body that is not UTF-8 or not a catalog.  |
-| `MODELS_DEV_CATALOG_TOO_SMALL` | The catalog has fewer usable providers or models than configured. | Usable-row floors prevent catalog writes.                      |
-| `MODELS_DEV_CATALOG_TOO_LARGE` | The catalog exceeds 8 MiB.                                        | Declared or streamed download bytes exceed the limit.          |
-| `MODELS_DEV_SYNC_FAILED`       | The catalog sync failed.                                          | A catalog write or another step without a specific code fails. |
-| `MODELS_DEV_LEASE_LOST`        | The sync run no longer owns its lease.                            | Another run took the lease before a write or completion.       |
+| Code                           | Message                                                           | When                                                                  |
+| ------------------------------ | ----------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `MODELS_DEV_INVALID_ARGUMENT`  | An argument is missing, malformed or out of bounds.               | Invalid query, cursor, usage or table-backed configuration arguments. |
+| `MODELS_DEV_PROVIDER_ERROR`    | The catalog provider returned a failure response.                 | An HTTP response has a failure status.                                |
+| `MODELS_DEV_NETWORK_ERROR`     | The request to models.dev failed before a response arrived.       | Fetch or a body read throws or times out.                             |
+| `MODELS_DEV_INVALID_RESPONSE`  | The catalog response is malformed.                                | A 3xx response, or a body that is not UTF-8 or not a catalog.         |
+| `MODELS_DEV_CATALOG_TOO_SMALL` | The catalog has fewer usable providers or models than configured. | Usable-row floors prevent catalog writes.                             |
+| `MODELS_DEV_CATALOG_TOO_LARGE` | The catalog exceeds 8 MiB.                                        | Declared or streamed download bytes exceed the limit.                 |
+| `MODELS_DEV_SYNC_FAILED`       | The catalog sync failed.                                          | A catalog write or another step without a specific code fails.        |
+| `MODELS_DEV_LEASE_LOST`        | The sync run no longer owns its lease.                            | Another run took the lease before a write or completion.              |
 
 ## Testing
 
@@ -222,28 +222,28 @@ register(t);
 
 ## Limits and retention
 
-| Input                                        | Limit                                                      |
-| -------------------------------------------- | ---------------------------------------------------------- |
-| `paginationOpts.numItems`                    | Integer from 1 through 100                                 |
-| Rows read per page                           | `numItems + 1`                                             |
-| Document bytes per page                      | 1 MiB target                                               |
-| `cursor`, `endCursor`                        | 4096 characters; JSON array of at most 16 primitive values |
-| `models.search` `limit`                      | Default 10, maximum 50                                     |
-| `models.listCheapest` `limit`                | Default 5, maximum 20                                      |
-| `models.listCheapest` `modelsDevProviderIds` | 64 distinct IDs                                            |
-| `models.listCheapest` scan                   | 1927 priced rows                                           |
-| `models.listEquivalents` `limit`             | Default and maximum 200                                    |
-| `models.listPriceChanges` `limit`            | Default 50, maximum 200                                    |
-| `providers.list` result                      | 500 providers                                              |
-| `models.getByKey` provider prefixes          | 8                                                          |
-| `sourceUrl`                                  | 2048 UTF-8 bytes, HTTPS, no credentials, query or fragment |
-| Catalog download                             | 8 MiB                                                      |
-| Indexed strings                              | 1 KiB of UTF-8                                             |
-| Other retained strings                       | 16 KiB of UTF-8                                            |
-| Arrays and objects                           | 128 entries                                                |
-| Normalized row                               | 4 KiB (model) or 64 KiB (provider) of serialized JSON      |
-| Upsert batch                                 | 100 rows or 512 KiB of serialized JSON                     |
-| History deletion batch                       | 500 documents; a full batch schedules the next             |
+| Input                                        | Limit                                                                             |
+| -------------------------------------------- | --------------------------------------------------------------------------------- |
+| `paginationOpts.numItems`                    | Integer from 1 through 100                                                        |
+| Rows read per page                           | `numItems + 1`                                                                    |
+| Document bytes per page                      | 1 MiB target                                                                      |
+| `cursor`, `endCursor`                        | 4096 characters; at most the index’s declared field count plus 2 primitive values |
+| `models.search` `limit`                      | Default 10, maximum 50                                                            |
+| `models.listCheapest` `limit`                | Default 5, maximum 20                                                             |
+| `models.listCheapest` `modelsDevProviderIds` | 64 distinct IDs                                                                   |
+| `models.listCheapest` scan                   | 1927 priced rows                                                                  |
+| `models.listEquivalents` `limit`             | Default and maximum 200                                                           |
+| `models.listPriceChanges` `limit`            | Default 50, maximum 200                                                           |
+| `providers.list` result                      | Paginated; the shared row and byte bounds apply                                   |
+| `models.getByKey` provider prefixes          | 8                                                                                 |
+| `sourceUrl`                                  | 2048 UTF-8 bytes, HTTPS, no credentials, query or fragment                        |
+| Catalog download                             | 8 MiB                                                                             |
+| Indexed strings                              | 1 KiB of UTF-8                                                                    |
+| Other retained strings                       | 16 KiB of UTF-8                                                                   |
+| Arrays and objects                           | 128 entries                                                                       |
+| Normalized row                               | 4 KiB (model) or 64 KiB (provider) of serialized JSON                             |
+| Upsert batch                                 | 100 rows or 512 KiB of serialized JSON                                            |
+| History deletion batch                       | 500 documents; a full batch schedules the next                                    |
 
 The hourly `cleanup` cron runs whether or not `enabled` is set and whether or not syncs succeed. Each run reads `retentionDays` and deletes at most 500 expired history documents; a run that fills its batch schedules another run. History records model additions, removals, price changes and tier changes. `syncState` and `config` are singletons. Download, normalization, batch and query bounds are described above.
 
