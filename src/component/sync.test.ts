@@ -47,6 +47,7 @@ beforeEach(() => {
   vi.setSystemTime(NOW);
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
@@ -490,6 +491,34 @@ describe("source fallback", () => {
     expect(new Headers(server.calls[1]?.init.headers).get("if-none-match")).toBeNull();
   });
 
+  test("each source failure is recorded once, and only fetch failures are network errors", async () => {
+    const t = setup();
+    await relaxGuards(t);
+    const server = catalogServer({ body: fixtureJson() });
+    server.failPrimary = true;
+    const digest = crypto.subtle.digest.bind(crypto.subtle);
+    let digests = 0;
+    vi.spyOn(crypto.subtle, "digest").mockImplementation(async (algorithm, data) => {
+      digests++;
+      if (digests > 1) throw new Error("digest unavailable");
+      return digest(algorithm, data);
+    });
+    const applyFailed = await sync(t);
+    expect(applyFailed.errors).toEqual([
+      expect.objectContaining({ source: "primary", code: "MODELS_DEV_PROVIDER_ERROR" }),
+      expect.objectContaining({ source: "fallback", code: "MODELS_DEV_SYNC_FAILED" }),
+    ]);
+    expect((await t.query(api.sync.getStatus, {})).errors).toEqual(applyFailed.errors);
+    server.failPrimary = false;
+    digests = 1;
+    const loadFailed = await sync(t);
+    expect(loadFailed.errors.map(({ source, code }) => [source, code])).toEqual([
+      ["primary", "MODELS_DEV_SYNC_FAILED"],
+      ["fallback", "MODELS_DEV_SYNC_FAILED"],
+    ]);
+    expect(loadFailed.errors.every((entry) => entry.retryable === undefined)).toBe(true);
+  });
+
   test("a network exception is classified as an error, not thrown", async () => {
     const t = setup();
     await relaxGuards(t);
@@ -498,7 +527,30 @@ describe("source fallback", () => {
     });
     const result = await sync(t);
     expect(result.status).toBe("error");
-    expect(result.errors.at(-1)?.code).toBe("MODELS_DEV_NETWORK_ERROR");
+    expect(result.errors.map(({ code, retryable }) => [code, retryable])).toEqual([
+      ["MODELS_DEV_NETWORK_ERROR", true],
+      ["MODELS_DEV_NETWORK_ERROR", true],
+    ]);
+  });
+
+  test("a body read failure is a network error", async () => {
+    const t = setup();
+    await relaxGuards(t);
+    stubFetch(
+      () =>
+        new Response(
+          new ReadableStream({
+            pull(controller) {
+              controller.error(new TypeError("connection reset"));
+            },
+          }),
+        ),
+    );
+    const result = await sync(t);
+    expect(result.errors.map(({ code }) => code)).toEqual([
+      "MODELS_DEV_NETWORK_ERROR",
+      "MODELS_DEV_NETWORK_ERROR",
+    ]);
   });
 });
 
@@ -548,7 +600,7 @@ describe("lease", () => {
           {
             source: "primary",
             code: "MODELS_DEV_SYNC_FAILED",
-            message: "The catalog write failed.",
+            message: "The catalog sync failed.",
           },
         ],
         durationMs: 1,
@@ -582,6 +634,26 @@ describe("lease", () => {
     await sync(t);
     expect(await state(t)).toMatchObject({ running: false });
     expect((await t.query(api.sync.getStatus, {})).running).toBe(false);
+  });
+
+  test("a failed run whose lease was taken over reports lease_lost and leaves the new lease", async () => {
+    const t = setup();
+    stubFetch(async () => {
+      vi.setSystemTime(NOW + LEASE_MS + 1);
+      await t.mutation(internal.sync.begin, { runId: "thief", force: true, cron: false });
+      return new Response("down", { status: 503 });
+    });
+    const result = await sync(t);
+    expect(result).toMatchObject({
+      status: "error",
+      errors: [
+        { source: "primary", code: "MODELS_DEV_PROVIDER_ERROR" },
+        { source: "fallback", code: "MODELS_DEV_PROVIDER_ERROR" },
+        { source: "fallback", code: "MODELS_DEV_LEASE_LOST" },
+      ],
+    });
+    expect(result.errors).toHaveLength(3);
+    expect(await state(t)).toMatchObject({ runId: "thief", running: true });
   });
 });
 
@@ -680,7 +752,7 @@ describe("lease fencing", () => {
           {
             source: "primary",
             code: "MODELS_DEV_SYNC_FAILED",
-            message: "The catalog write failed.",
+            message: "The catalog sync failed.",
           },
         ],
         durationMs: 1,
@@ -938,7 +1010,7 @@ test.each([{ cost: "bad" }, { cost: [] }, { cost: 123 }])(
   },
 );
 
-test("downloads stop before buffering more than 16 MiB", async () => {
+test("downloads stop before buffering more than 8 MiB", async () => {
   const t = setupTest();
   await relaxGuards(t);
   let cancelled = 0;
@@ -950,7 +1022,7 @@ test("downloads stop before buffering more than 16 MiB", async () => {
         pull(controller) {
           chunks++;
           sourceChunks++;
-          if (sourceChunks === 40) controller.close();
+          if (sourceChunks === 20) controller.close();
           else controller.enqueue(new Uint8Array(1024 * 1024));
         },
         cancel() {
@@ -964,7 +1036,7 @@ test("downloads stop before buffering more than 16 MiB", async () => {
     errors: [{ code: "MODELS_DEV_CATALOG_TOO_LARGE" }, { code: "MODELS_DEV_CATALOG_TOO_LARGE" }],
   });
   expect(cancelled).toBe(2);
-  expect(chunks).toBeLessThan(40);
+  expect(chunks).toBeLessThan(2 * 20);
 });
 
 test("a completed source without an etag clears the previous source etag", async () => {
@@ -1222,6 +1294,14 @@ test("a catalog streamed without content-length grows its buffer and reads compl
   expect(await sync(t)).toMatchObject({ status: "ok", modelCount: FIXTURE_MODEL_COUNT });
 });
 
+test("a streamed catalog of exactly 8 MiB is read completely", async () => {
+  const t = setupTest();
+  await relaxGuards(t);
+  const body = fixtureJson().padEnd(8 * 1024 * 1024, " ");
+  stubFetch(() => streamedResponse(body, 1024 * 1024));
+  expect(await sync(t)).toMatchObject({ status: "ok", modelCount: FIXTURE_MODEL_COUNT });
+});
+
 test("a content-length below the decoded body size still reads the whole catalog", async () => {
   const t = setupTest();
   await relaxGuards(t);
@@ -1230,7 +1310,7 @@ test("a content-length below the decoded body size still reads the whole catalog
   expect(await sync(t)).toMatchObject({ status: "ok", modelCount: FIXTURE_MODEL_COUNT });
 });
 
-test("a content-length above 16 MiB is rejected before reading", async () => {
+test("a content-length above 8 MiB is rejected before reading", async () => {
   const t = setupTest();
   await relaxGuards(t);
   let pulls = 0;
@@ -1243,7 +1323,7 @@ test("a content-length above 16 MiB is rejected before reading", async () => {
             controller.enqueue(new Uint8Array(1024));
           },
         }),
-        { headers: { "content-length": String(16 * 1024 * 1024 + 1) } },
+        { headers: { "content-length": String(8 * 1024 * 1024 + 1) } },
       ),
   );
   expect(await sync(t)).toMatchObject({

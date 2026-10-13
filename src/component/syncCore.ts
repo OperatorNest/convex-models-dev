@@ -25,7 +25,7 @@ export const USER_AGENT =
 
 const CHUNK_SIZE = 100;
 const MAX_BATCH_BYTES = 512 * 1024;
-const MAX_CATALOG_BYTES = 16 * 1024 * 1024;
+const MAX_CATALOG_BYTES = 8 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 60_000;
 const REMOVAL_GUARD_FRACTION = 0.2;
 
@@ -48,14 +48,17 @@ class LeaseLost extends Error {
   }
 }
 
-function failureData(
-  error: unknown,
-  code: "MODELS_DEV_NETWORK_ERROR" | "MODELS_DEV_SYNC_FAILED",
-): ModelsDevErrorData {
-  if (isModelsDevError(error)) return error.data;
-  return code === "MODELS_DEV_NETWORK_ERROR"
-    ? modelsDevError(code, { retryable: true }).data
-    : modelsDevError(code).data;
+function failureData(error: unknown): ModelsDevErrorData {
+  return isModelsDevError(error) ? error.data : modelsDevError("MODELS_DEV_SYNC_FAILED").data;
+}
+
+async function readNetwork<T>(pending: Promise<T>): Promise<T> {
+  try {
+    return await pending;
+  } catch (error) {
+    if (isModelsDevError(error)) throw error;
+    throw modelsDevError("MODELS_DEV_NETWORK_ERROR", { retryable: true });
+  }
 }
 const INITIAL_BUFFER_BYTES = 1024 * 1024;
 
@@ -73,7 +76,7 @@ async function readCatalog(response: Response): Promise<Uint8Array<ArrayBuffer>>
   let bytes = 0;
   try {
     for (;;) {
-      const chunk = await reader.read();
+      const chunk = await readNetwork(reader.read());
       if (chunk.done) break;
       const needed = bytes + chunk.value.byteLength;
       if (needed > MAX_CATALOG_BYTES) {
@@ -113,7 +116,7 @@ async function loadCatalog(
   let buffer: Uint8Array<ArrayBuffer> | null;
   let etag: string | undefined;
   try {
-    const response = await fetch(url, { headers, signal: controller.signal });
+    const response = await readNetwork(fetch(url, { headers, signal: controller.signal }));
     if (response.status === 304 && headers["if-none-match"]) {
       return { kind: "not_modified", url };
     }
@@ -359,24 +362,33 @@ export async function runSync(
   const urls = [...new Set([config.sourceUrl, FALLBACK_SOURCE_URL])];
   const errors: SyncSourceError[] = [];
   let activeSource: SyncSourceError["source"] = "primary";
+  const summarizeLeaseLoss = (): SyncSummary => ({
+    status: "error",
+    errors: [...errors, { source: activeSource, ...modelsDevError("MODELS_DEV_LEASE_LOST").data }],
+    durationMs: Date.now() - started,
+  });
   const recordFailure = async (): Promise<SyncSummary> => {
     const durationMs = Date.now() - started;
-    await ctx.runMutation(internal.sync.finish, { runId, status: "error", errors, durationMs });
-    return { status: "error", errors, durationMs };
+    const recorded = await ctx.runMutation(internal.sync.finish, {
+      runId,
+      status: "error",
+      errors,
+      durationMs,
+    });
+    return recorded ? { status: "error", errors, durationMs } : summarizeLeaseLoss();
   };
-  try {
-    let loaded: Loaded | undefined;
-    for (const [index, url] of urls.entries()) {
-      activeSource = index === 0 ? "primary" : "fallback";
-      try {
-        loaded = await loadCatalog(url, state, config);
-        break;
-      } catch (error) {
-        errors.push({ source: activeSource, ...failureData(error, "MODELS_DEV_NETWORK_ERROR") });
-      }
+  let loaded: Loaded | undefined;
+  for (const [index, url] of urls.entries()) {
+    activeSource = index === 0 ? "primary" : "fallback";
+    try {
+      loaded = await loadCatalog(url, state, config);
+      break;
+    } catch (error) {
+      errors.push({ source: activeSource, ...failureData(error) });
     }
-    if (!loaded) return await recordFailure();
-
+  }
+  if (!loaded) return await recordFailure();
+  try {
     if (loaded.kind === "not_modified") {
       const durationMs = Date.now() - started;
       const recorded = await ctx.runMutation(internal.sync.finish, {
@@ -431,19 +443,8 @@ export async function runSync(
       errors,
     };
   } catch (error) {
-    if (error instanceof LeaseLost) {
-      return {
-        status: "error",
-        errors: [
-          ...errors,
-          { source: activeSource, ...modelsDevError("MODELS_DEV_LEASE_LOST").data },
-        ],
-        durationMs: Date.now() - started,
-      };
-    }
-    const data = failureData(error, "MODELS_DEV_SYNC_FAILED");
-    if (!errors.some((entry) => entry.source === activeSource))
-      errors.push({ source: activeSource, ...data });
+    if (error instanceof LeaseLost) return summarizeLeaseLoss();
+    errors.push({ source: activeSource, ...failureData(error) });
     return await recordFailure();
   }
 }

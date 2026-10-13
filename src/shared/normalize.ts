@@ -1,14 +1,7 @@
 import { modelsDevError } from "./errors.js";
 import { isRecord } from "./guards.js";
 import { jsonBytes, utf8Bytes } from "./bounds.js";
-import type {
-  ModelRow,
-  ModelStatus,
-  CostFields,
-  CostTier,
-  PricingSnapshot,
-  ProviderRow,
-} from "./validators.js";
+import type { ModelRow, CostFields, CostTier, PricingSnapshot, ProviderRow } from "./validators.js";
 
 const MODALITY_BITS: Record<string, number> = { text: 1, audio: 2, image: 4, video: 8, pdf: 16 };
 const MODE_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
@@ -44,8 +37,10 @@ function validStored(value: unknown): boolean {
     );
   return true;
 }
-function rowFits(value: unknown): boolean {
-  return validStored(value) && jsonBytes(value) <= 65536;
+export const MAX_MODEL_ROW_BYTES = 4096;
+const MAX_PROVIDER_ROW_BYTES = 65536;
+function rowFits(value: unknown, maxBytes: number): boolean {
+  return validStored(value) && jsonBytes(value) <= maxBytes;
 }
 const DATE_SHAPE = /^(\d{4})-(\d{2})(?:-(\d{2}))?$/;
 
@@ -176,10 +171,6 @@ function parseReasoningOptions(raw: unknown): ModelRow["reasoningOptions"] {
   return out;
 }
 
-function modelStatus(value: unknown): ModelStatus | undefined {
-  return value === "alpha" || value === "beta" || value === "deprecated" ? value : undefined;
-}
-
 function parseModes(raw: unknown): ModelRow["modes"] {
   if (raw === undefined) return undefined;
   if (!isRecord(raw)) throw new Invalid("modes");
@@ -244,7 +235,7 @@ export function normalizeModel(
     assign("description", optString(raw, "description"));
     assign("structuredOutput", optBool(raw, "structured_output"));
     assign("temperature", optBool(raw, "temperature"));
-    assign("status", modelStatus(raw.status));
+    assign("status", optString(raw, "status"));
     assign("knowledge", optString(raw, "knowledge"));
     assign("reasoningOptions", parseReasoningOptions(raw.reasoning_options));
     if (raw.interleaved === true) row.interleaved = true;
@@ -280,7 +271,7 @@ export function normalizeModel(
       if (typeof provider.shape === "string") override.shape = provider.shape;
       if (Object.keys(override).length > 0) row.providerOverride = override;
     }
-    return rowFits(row) &&
+    return rowFits(row, MAX_MODEL_ROW_BYTES) &&
       INDEX_STRING_FIELDS.every((field) => {
         const value = row[field];
         return value === undefined || utf8Bytes(value) <= INDEX_STRING_BYTES;
@@ -315,7 +306,7 @@ export function normalizeProvider(
       const value = optString(raw, field);
       if (value !== undefined) row[field] = value;
     }
-    return rowFits(row) ? row : null;
+    return rowFits(row, MAX_PROVIDER_ROW_BYTES) ? row : null;
   } catch (error) {
     if (error instanceof Invalid) return null;
     throw error;

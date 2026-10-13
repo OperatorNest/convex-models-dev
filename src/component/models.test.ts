@@ -475,7 +475,7 @@ describe("estimate", () => {
       usage: { inputTokens: 1000, outputTokens: 500 },
     });
     expect(e).toMatchObject({ known: true, nanoUsd: 10_500_000, tier: null, mode: null });
-    if (e.known) expect(e.priceSnapshotAt).toBeGreaterThan(0);
+    if (e.known) expect(e.modelUpdatedAt).toBeGreaterThan(0);
   });
 
   test("applies tiers, modes and the cache semantics flag", async () => {
@@ -847,11 +847,13 @@ test("an unpriced requested mode is unknown", async () => {
   ).toEqual({ known: false });
 });
 
+const CHEAPEST_SCAN_BOUND = 1927;
+
 test("provider cheapest reads past unrelated rows and reports scan truncation", async () => {
   const t = setupTest();
   const base = fixtureModel("openai", "gpt-5.4");
   await t.run(async (ctx) => {
-    for (let i = 0; i < 4001; i++)
+    for (let i = 0; i <= CHEAPEST_SCAN_BOUND; i++)
       await ctx.db.insert("models", {
         ...base,
         modelsDevProviderId: "unrelated",
@@ -886,17 +888,17 @@ test("provider cheapest reads past unrelated rows and reports scan truncation", 
     models: [],
     isComplete: false,
   });
-  expect(await t.query(api.models.listCheapest, { modelsDevProviderIds: [] })).toEqual({
-    models: [],
-    isComplete: true,
-  });
+  await expectModelsDevError(
+    t.query(api.models.listCheapest, { modelsDevProviderIds: [] }),
+    "MODELS_DEV_INVALID_ARGUMENT",
+  );
 }, 60000);
 
-test("cheapest stops before requesting row 4001", async () => {
+test("cheapest reads exactly the 1927-row scan bound and stops before row 1928", async () => {
   const t = setupTest();
   const base = fixtureModel("openai", "gpt-5.4");
   await t.run(async (ctx) => {
-    for (let i = 0; i < 4001; i++)
+    for (let i = 0; i <= CHEAPEST_SCAN_BOUND; i++)
       await ctx.db.insert("models", {
         ...base,
         modelsDevModelId: `scan-${i}`,
@@ -946,7 +948,7 @@ test("cheapest stops before requesting row 4001", async () => {
       isComplete: false,
     });
   });
-  expect(reads).toBe(4000);
+  expect(reads).toBe(CHEAPEST_SCAN_BOUND);
 }, 60000);
 
 test("the type filter selects one model type or models without a type", async () => {

@@ -101,8 +101,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             };
             known: true;
             mode: string | null;
+            modelUpdatedAt: number | null;
             nanoUsd: number;
-            priceSnapshotAt: number | null;
             tier: number | null;
             usd: number;
           },
@@ -175,7 +175,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           >;
           releaseDate: string;
           searchText: string;
-          status?: "alpha" | "beta" | "deprecated";
+          status?: string;
           structuredOutput?: boolean;
           temperature?: boolean;
           tiers?: Array<{
@@ -261,7 +261,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           >;
           releaseDate: string;
           searchText: string;
-          status?: "alpha" | "beta" | "deprecated";
+          status?: string;
           structuredOutput?: boolean;
           temperature?: boolean;
           tiers?: Array<{
@@ -302,7 +302,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             numItems: number;
           };
           reasoning?: boolean;
-          status?: "alpha" | "beta" | "deprecated";
+          status?: string;
           structuredOutput?: boolean;
           toolCall?: boolean;
           type?: string | null;
@@ -373,7 +373,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             >;
             releaseDate: string;
             searchText: string;
-            status?: "alpha" | "beta" | "deprecated";
+            status?: string;
             structuredOutput?: boolean;
             temperature?: boolean;
             tiers?: Array<{
@@ -477,7 +477,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             >;
             releaseDate: string;
             searchText: string;
-            status?: "alpha" | "beta" | "deprecated";
+            status?: string;
             structuredOutput?: boolean;
             temperature?: boolean;
             tiers?: Array<{
@@ -564,7 +564,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           >;
           releaseDate: string;
           searchText: string;
-          status?: "alpha" | "beta" | "deprecated";
+          status?: string;
           structuredOutput?: boolean;
           temperature?: boolean;
           tiers?: Array<{
@@ -754,7 +754,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           >;
           releaseDate: string;
           searchText: string;
-          status?: "alpha" | "beta" | "deprecated";
+          status?: string;
           structuredOutput?: boolean;
           temperature?: boolean;
           tiers?: Array<{
@@ -845,7 +845,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           >;
           releaseDate: string;
           searchText: string;
-          status?: "alpha" | "beta" | "deprecated";
+          status?: string;
           structuredOutput?: boolean;
           temperature?: boolean;
           tiers?: Array<{

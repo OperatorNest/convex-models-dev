@@ -1,3 +1,4 @@
+/** Maps AI SDK provider names to models.dev provider IDs where they differ. */
 export const DEFAULT_PROVIDER_ALIASES: Readonly<Record<string, string>> = {
   gateway: "vercel",
   "google.generative-ai": "google",

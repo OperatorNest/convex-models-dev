@@ -9,13 +9,8 @@ export const modelsDevErrorValidator = v.object({
   providerCode: v.optional(v.string()),
 });
 
-export const modelStatusValidator = v.union(
-  v.literal("alpha"),
-  v.literal("beta"),
-  v.literal("deprecated"),
-);
-/** Names the catalog maturity or retirement state of a model. */
-export type ModelStatus = Infer<typeof modelStatusValidator>;
+/** Lists the catalog model statuses this package documents; other upstream statuses are stored verbatim. */
+export const KNOWN_MODEL_STATUSES = ["alpha", "beta", "deprecated"] as const;
 
 export const costFieldsValidator = v.object({
   input: v.optional(v.number()),
@@ -85,7 +80,7 @@ export const modelFields = {
   structuredOutput: v.optional(v.boolean()),
   temperature: v.optional(v.boolean()),
   openWeights: v.boolean(),
-  status: v.optional(modelStatusValidator),
+  status: v.optional(v.string()),
   inputMask: v.number(),
   outputMask: v.number(),
   reasoningOptions: v.optional(v.array(reasoningOptionValidator)),
@@ -194,7 +189,7 @@ export const costEstimateValidator = v.union(
     tier: v.union(v.number(), v.null()),
     mode: v.union(v.string(), v.null()),
     assumptions: v.array(v.string()),
-    priceSnapshotAt: v.union(v.number(), v.null()),
+    modelUpdatedAt: v.union(v.number(), v.null()),
   }),
 );
 
@@ -237,6 +232,7 @@ export const syncSourceErrorValidator = v.object({
 /** Contains a fixed diagnostic for one attempted catalog source. */
 export type SyncSourceError = Infer<typeof syncSourceErrorValidator>;
 
+/** Validates the recorded catalog sync state returned by `sync.getStatus`. */
 export const syncStatusValidator = v.object({
   state: syncStateValidator,
 
@@ -262,6 +258,7 @@ export const syncSkipReasonValidator = v.union(
 /** Names the condition that prevented a catalog sync from starting. */
 export type SyncSkipReason = Infer<typeof syncSkipReasonValidator>;
 
+/** Validates the summary a catalog sync run returns. */
 export const syncSummaryValidator = v.object({
   status: v.union(lastStatusValidator, v.literal("skipped")),
   reason: v.optional(syncSkipReasonValidator),

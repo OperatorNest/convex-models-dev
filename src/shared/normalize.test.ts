@@ -13,7 +13,9 @@ import {
   inspectCatalog,
   modalityMask,
   pricingOf,
+  MAX_MODEL_ROW_BYTES,
 } from "./normalize.js";
+import { jsonBytes } from "./bounds.js";
 
 import { canonicalJson, rowHash, sha256Hex } from "./hash.js";
 
@@ -274,14 +276,19 @@ test("model type is stored verbatim and absent for language models", () => {
   expect(fixtureModel("openai", "gpt-5-mini").type).toBeUndefined();
 });
 
-test("an unknown status is dropped and the model is kept", () => {
-  const row = normalizeModel("p", "m", {
-    ...rawModel(fixtureCatalog, "openai", "gpt-5-mini"),
-    status: "preview",
-  });
-  expect(row).not.toBeNull();
-  expect(row?.status).toBeUndefined();
+test("an unrecognized status is stored verbatim and a non-string status skips the model", () => {
+  const raw = rawModel(fixtureCatalog, "openai", "gpt-5-mini");
+  expect(normalizeModel("p", "m", { ...raw, status: "retired" })?.status).toBe("retired");
+  expect(normalizeModel("p", "m", { ...raw, status: 1 })).toBeNull();
   expect(fixtureModel("azure", "deepseek-v4.1-flash").status).toBe("beta");
+});
+
+test("a model row above 4 KiB of serialized JSON is skipped", () => {
+  const raw = rawModel(fixtureCatalog, "openai", "gpt-5-mini");
+  const fitted = normalizeModel("p", "m", { ...raw, description: "" });
+  const room = MAX_MODEL_ROW_BYTES - jsonBytes(fitted);
+  expect(normalizeModel("p", "m", { ...raw, description: "d".repeat(room) })).not.toBeNull();
+  expect(normalizeModel("p", "m", { ...raw, description: "d".repeat(room + 1) })).toBeNull();
 });
 
 test("limits are stored as the upstream limit object", () => {

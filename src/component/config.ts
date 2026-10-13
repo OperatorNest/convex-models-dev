@@ -71,12 +71,8 @@ export const update = mutation({
       } catch {
         throw modelsDevError("MODELS_DEV_INVALID_ARGUMENT");
       }
-      if (url.protocol !== "https:") {
+      if (url.protocol !== "https:" || url.username || url.password || /[?#]/.test(args.sourceUrl))
         throw modelsDevError("MODELS_DEV_INVALID_ARGUMENT");
-      }
-      if (url.username || url.password) {
-        throw modelsDevError("MODELS_DEV_INVALID_ARGUMENT");
-      }
     }
     if (args.minIntervalMinutes !== undefined) {
       assertFinite(args.minIntervalMinutes, MIN_INTERVAL_FLOOR_MINUTES);

@@ -228,7 +228,7 @@ export function estimateCost(
     tier: tierSize,
     mode,
     assumptions,
-    priceSnapshotAt: model.updatedAt ?? null,
+    modelUpdatedAt: model.updatedAt ?? null,
   };
 }
 

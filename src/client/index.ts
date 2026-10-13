@@ -23,12 +23,12 @@ export type { ModelsDevErrorCode, ModelsDevErrorData } from "../shared/errors.js
 export {
   syncStatusValidator,
   syncSummaryValidator,
+  KNOWN_MODEL_STATUSES,
   type CostBreakdown,
   type CostEstimate,
   type CostFields,
   type CostTier,
   type InputTokenScope,
-  type ModelStatus,
   type PartialReason,
   type SyncRunStatus,
   type SyncState,

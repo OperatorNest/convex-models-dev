@@ -7,19 +7,22 @@ import schema from "./schema.js";
 import { boundedLimit, boundedPage, finiteBounds } from "../shared/bounds.js";
 import { modelsDevError } from "../shared/errors.js";
 import { estimateCost as estimateModelCost, validateUsage } from "../shared/cost.js";
-import { modalityMask } from "../shared/normalize.js";
+import { MAX_MODEL_ROW_BYTES, modalityMask } from "../shared/normalize.js";
 import { listProviderCandidates, splitModelKey } from "../shared/resolve.js";
 import {
   costEstimateValidator,
   usageValidator,
-  modelStatusValidator,
   inputTokenScopeValidator,
 } from "../shared/validators.js";
 
 const modelDoc = schema.doc("models");
 const modalityList = v.array(v.string());
 const MODALITY_NAMES = new Set(["text", "audio", "image", "video", "pdf"]);
-const CHEAPEST_MAX_SCAN = 4000;
+const HALF_QUERY_READ_BYTES = 8 * 1024 * 1024;
+const STORED_FIELD_BYTES = 256;
+const CHEAPEST_MAX_SCAN = Math.floor(
+  HALF_QUERY_READ_BYTES / (MAX_MODEL_ROW_BYTES + STORED_FIELD_BYTES),
+);
 const MAX_CHEAPEST_PROVIDER_IDS = 64;
 const modelTypeFilter = v.optional(v.union(v.string(), v.null()));
 
@@ -107,7 +110,7 @@ export const list = query({
     modelsDevProviderId: v.optional(v.string()),
     family: v.optional(v.string()),
     type: modelTypeFilter,
-    status: v.optional(modelStatusValidator),
+    status: v.optional(v.string()),
     reasoning: v.optional(v.boolean()),
     toolCall: v.optional(v.boolean()),
     structuredOutput: v.optional(v.boolean()),
@@ -236,7 +239,7 @@ export const listCheapest = query({
     const excludeDeprecated = args.excludeDeprecated ?? true;
     const required = masks(args.inputModalities).reduce((acc, bit) => acc | bit, 0);
     const providers = args.modelsDevProviderIds ? new Set(args.modelsDevProviderIds) : undefined;
-    if (providers && providers.size > MAX_CHEAPEST_PROVIDER_IDS)
+    if (providers && (providers.size === 0 || providers.size > MAX_CHEAPEST_PROVIDER_IDS))
       throw modelsDevError("MODELS_DEV_INVALID_ARGUMENT");
     const matches = (m: Doc<"models">) =>
       (args.minContextTokens === undefined || m.limit.context >= args.minContextTokens) &&

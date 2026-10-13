@@ -2,6 +2,7 @@ import { ConvexError } from "convex/values";
 import { truncateText } from "./bounds.js";
 
 // repository-codes:begin
+/** Lists every error code this component throws or records. */
 export const MODELS_DEV_ERROR_CODES = [
   "MODELS_DEV_INVALID_ARGUMENT",
   "MODELS_DEV_PROVIDER_ERROR",
@@ -21,11 +22,11 @@ const MODELS_DEV_PROVIDER_ERROR_CODES = [
 const MODELS_DEV_ERROR_MESSAGES = {
   MODELS_DEV_INVALID_ARGUMENT: "An argument is malformed or outside its bounds.",
   MODELS_DEV_PROVIDER_ERROR: "The catalog provider returned a failure response.",
-  MODELS_DEV_NETWORK_ERROR: "The catalog request produced no response.",
+  MODELS_DEV_NETWORK_ERROR: "The catalog request or body read failed.",
   MODELS_DEV_INVALID_RESPONSE: "The catalog response is malformed.",
   MODELS_DEV_CATALOG_TOO_SMALL: "The catalog has fewer usable providers or models than configured.",
-  MODELS_DEV_CATALOG_TOO_LARGE: "The catalog exceeds 16 MiB.",
-  MODELS_DEV_SYNC_FAILED: "The catalog write failed.",
+  MODELS_DEV_CATALOG_TOO_LARGE: "The catalog exceeds 8 MiB.",
+  MODELS_DEV_SYNC_FAILED: "The catalog sync failed.",
   MODELS_DEV_LEASE_LOST: "The sync run no longer owns its lease.",
 } as const satisfies Record<ModelsDevErrorCode, string>;
 // repository-codes:end

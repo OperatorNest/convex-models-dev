@@ -330,9 +330,9 @@ describe("usage normalization", () => {
     expect(e.usd).toBe(4200 / 1e9);
   });
 
-  test("priceSnapshotAt echoes updatedAt", () => {
-    expect(known({ ...model, updatedAt: 123 }, { inputTokens: 1 }).priceSnapshotAt).toBe(123);
-    expect(known(model, { inputTokens: 1 }).priceSnapshotAt).toBeNull();
+  test("modelUpdatedAt echoes the stored row updatedAt", () => {
+    expect(known({ ...model, updatedAt: 123 }, { inputTokens: 1 }).modelUpdatedAt).toBe(123);
+    expect(known(model, { inputTokens: 1 }).modelUpdatedAt).toBeNull();
   });
 });
 

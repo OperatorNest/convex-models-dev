@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { cpSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { join, resolve } from "node:path";
@@ -199,18 +199,33 @@ async function journey(backend) {
     "packed tarball passes a strict consumer typecheck and its test entrypoint runs",
     () => {
       const consumer = join(backend.workspace, "consumer");
-      execFileSync(
+      const typecheck = spawnSync(
         process.execPath,
         [join(root, "node_modules/@typescript/native/bin/tsc"), "--noEmit"],
-        { cwd: consumer, env: smokeEnv, stdio: "pipe" },
+        { cwd: consumer, env: smokeEnv, encoding: "utf8" },
       );
-      check(true, "strict tarball consumer typecheck failed");
-      execFileSync(process.execPath, [join(root, "node_modules/vitest/vitest.mjs"), "run"], {
-        cwd: consumer,
-        env: smokeEnv,
-        stdio: "pipe",
-      });
-      check(true, "tarball consumer test failed");
+      check(
+        typecheck.status === 0,
+        `strict tarball consumer typecheck exited ${typecheck.status}: ${typecheck.stdout}`,
+      );
+      const consumerTest = spawnSync(
+        process.execPath,
+        [
+          join(root, "node_modules/vitest/vitest.mjs"),
+          "run",
+          "--reporter=json",
+          "--outputFile=test-report.json",
+        ],
+        { cwd: consumer, env: smokeEnv, encoding: "utf8" },
+      );
+      const report =
+        consumerTest.status === 0
+          ? JSON.parse(readFileSync(join(consumer, "test-report.json"), "utf8"))
+          : undefined;
+      check(
+        report?.numPassedTests === 1 && report.numTotalTests === 1,
+        `tarball consumer test exited ${consumerTest.status}: ${consumerTest.stderr}`,
+      );
     },
   );
 
@@ -234,8 +249,10 @@ async function journey(backend) {
 
   await step("forced sync stores the fixture catalog and releases the lease", async () => {
     await client.mutation(anyApi.example.configureSync, { minProviders: 1, minModels: 1 });
+    source.body = `${source.body} `;
+    source.etag = '"fixture-forced"';
     const synced = await action("syncForced");
-    check(["ok", "not_modified"].includes(synced.status), `sync status ${synced.status}`);
+    check(synced.status === "ok", `sync status ${synced.status}`);
     const status = await query("syncStatus");
     check(
       status.modelCount ===
@@ -449,7 +466,7 @@ async function journey(backend) {
 
   await step("oversized catalogs and upstream failures record ordered source errors", async () => {
     const savedBody = source.body;
-    source.body = source.body.padEnd(16 * 1024 * 1024 + 1, " ");
+    source.body = source.body.padEnd(8 * 1024 * 1024 + 1, " ");
     source.etag = '"fixture-large"';
     const tooLarge = await action("syncForced");
     check(
