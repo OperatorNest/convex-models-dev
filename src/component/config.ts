@@ -1,6 +1,6 @@
 import { v, type Infer } from "convex/values";
-import { internalQuery, mutation, query, type QueryCtx } from "./_generated/server.js";
-import { utf8Bytes, wellFormed } from "../shared/bounds.js";
+import { mutation, query, type QueryCtx } from "./_generated/server.js";
+import { utf8Bytes } from "../shared/bounds.js";
 import { modelsDevError } from "../shared/errors.js";
 
 const PRIMARY_SOURCE_URL = "https://models.dev/api.json";
@@ -45,12 +45,6 @@ export const get = query({
   handler: (ctx) => loadConfig(ctx),
 });
 
-export const getEffective = internalQuery({
-  args: {},
-  returns: effectiveConfigValidator,
-  handler: (ctx) => loadConfig(ctx),
-});
-
 function assertFinite(value: number, min: number) {
   if (!Number.isFinite(value) || value < min) {
     throw modelsDevError("MODELS_DEV_INVALID_ARGUMENT");
@@ -69,7 +63,7 @@ export const update = mutation({
   returns: effectiveConfigValidator,
   handler: async (ctx, args) => {
     if (args.sourceUrl !== undefined) {
-      if (!wellFormed(args.sourceUrl) || utf8Bytes(args.sourceUrl) > 2048)
+      if (!args.sourceUrl.isWellFormed() || utf8Bytes(args.sourceUrl) > 2048)
         throw modelsDevError("MODELS_DEV_INVALID_ARGUMENT");
       let url: URL;
       try {

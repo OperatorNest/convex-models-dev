@@ -1,0 +1,23 @@
+---
+"@operatornest/convex-models-dev": minor
+---
+
+- Breaking: model limits move into `limit: { context, input?, output }`, copied verbatim from the catalog; the context-ordered indexes use the derived `contextTokens` field.
+- Breaking: the model `provider` field becomes `providerOverride`, holding the upstream `provider` object including `shape`.
+- Breaking: sync status and sync summaries name the loaded catalog URL `sourceUrl` instead of `source`; error entries keep `source: "primary" | "fallback"`.
+- Breaking: `models.listCheapest` rejects more than 64 distinct `modelsDevProviderIds` with `MODELS_DEV_INVALID_ARGUMENT` and deduplicates repeated IDs.
+- Breaking: remove the unused internal `config.getEffective` query.
+- An unknown upstream `status` is dropped and the model is kept, instead of skipping the model.
+- Accept month-only `YYYY-MM` dates and a reasoning budget `min` of -1, as the upstream schema does.
+- Store the upstream model `type` verbatim and add an optional `type` filter to `models.list` and `models.listCheapest`: a string selects that type, `null` selects models without a type, and omission filters nothing.
+- Partial runs record `partialReason` (`price_loss` or `removal`) and their counters; export the `PartialReason` type.
+- A provider's `modelCount` counts only its models that pass normalization.
+- An expired lease that no other run took over keeps accepting its run's writes and finish.
+- Size the download buffer from `content-length`, growing it by doubling up to 16 MiB when the header is absent.
+- Breaking: remove the `removalSkipped` sync counter; a skipped removal is reported only by `partialReason: "removal"`.
+- Breaking: list queries ignore caller `maximumRowsRead` and `maximumBytesRead`; each page reads at most `numItems + 1` rows and 1 MiB.
+- Breaking: list cursors longer than 4096 characters or holding more than 16 values throw `MODELS_DEV_INVALID_ARGUMENT`.
+- Breaking: `ModelsDev.component` is private; client pagination forwards only `numItems`, `cursor` and `endCursor`.
+- Provider and network errors always carry `retryable`; a network failure is `retryable: true`.
+- Strings containing well-formed surrogate pairs are accepted; lone surrogates are still rejected.
+- Document `sync.run`, `sync.runForced` and `config.update` in the README API table, and document the client context types.

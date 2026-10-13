@@ -1,6 +1,12 @@
 import { expect, test, describe } from "vitest";
 
-import { fixtureModel, fixtureCatalog, rawModel } from "../fixtures/index.js";
+import {
+  FIXTURE_MODEL_COUNT,
+  FIXTURE_PROVIDER_COUNT,
+  fixtureModel,
+  fixtureCatalog,
+  rawModel,
+} from "../fixtures/index.js";
 import {
   normalizeModel,
   normalizeProvider,
@@ -120,25 +126,34 @@ describe("providers and catalog shape", () => {
   });
 
   test("inspectCatalog counts providers and models and rejects non-objects", () => {
-    expect(inspectCatalog(fixtureCatalog)).toEqual({
-      providerCount: 5,
-      modelCount: 21,
+    expect(inspectCatalog(fixtureCatalog)).toMatchObject({
+      providerCount: FIXTURE_PROVIDER_COUNT,
+      modelCount: FIXTURE_MODEL_COUNT,
       skippedModels: 0,
     });
     expect(inspectCatalog({ a: { models: { m: {} } } })).toEqual({
       providerCount: 0,
       modelCount: 0,
       skippedModels: 1,
+      modelCountByProvider: new Map([["a", 0]]),
     });
     for (const broken of [3, null, {}, { models: [] }, { models: "x" }]) {
       expect(inspectCatalog({ a: { models: {} }, b: broken })).toEqual({
         providerCount: 0,
         modelCount: 0,
         skippedModels: 0,
+        modelCountByProvider: new Map([["a", 0]]),
       });
     }
     expect(() => inspectCatalog([])).toThrow();
     expect(() => inspectCatalog(null)).toThrow();
+  });
+
+  test("inspectCatalog counts only usable models per provider", () => {
+    const usable = rawModel(fixtureCatalog, "openai", "gpt-5-mini");
+    expect(
+      inspectCatalog({ a: { models: { good: usable, bad: { name: 3 } } } }).modelCountByProvider,
+    ).toEqual(new Map([["a", 1]]));
   });
 
   test("pricingOf returns undefined without cost", () => {
@@ -194,7 +209,7 @@ test("provider strings and arrays obey storage bounds", () => {
   expect(normalizeProvider("p", { env: Array.from({ length: 129 }, () => "KEY") }, 1)).toBeNull();
 });
 
-test.each([{ min: -1 }, { max: Infinity }, { min: 10, max: 1 }])(
+test.each([{ min: -2 }, { max: -1 }, { max: Infinity }, { min: 10, max: 1 }])(
   "invalid reasoning budgets are skipped: %j",
   (bounds) => {
     expect(
@@ -206,17 +221,22 @@ test.each([{ min: -1 }, { max: Infinity }, { min: 10, max: 1 }])(
   },
 );
 
-test.each(["not-a-date", "2026-02-30", "2026-2-01"])(
-  "invalid release date %s is skipped",
-  (release_date) => {
-    expect(
-      normalizeModel("p", "m", {
-        ...rawModel(fixtureCatalog, "openai", "gpt-5-mini"),
-        release_date,
-      }),
-    ).toBeNull();
-  },
-);
+test.each([
+  "not-a-date",
+  "2026-02-30",
+  "2026-2-01",
+  "2025-13",
+  "2025-00",
+  "2025-02-29",
+  "2025-04-",
+])("invalid release date %s is skipped", (release_date) => {
+  expect(
+    normalizeModel("p", "m", {
+      ...rawModel(fixtureCatalog, "openai", "gpt-5-mini"),
+      release_date,
+    }),
+  ).toBeNull();
+});
 
 test.each([
   { cost: { input: 1, output: 2, cache_read: null } },
@@ -227,4 +247,66 @@ test.each([
   expect(
     normalizeModel("p", "m", { ...rawModel(fixtureCatalog, "openai", "gpt-5-mini"), ...patch }),
   ).toBeNull();
+});
+
+test("a reasoning budget minimum of -1 is stored", () => {
+  expect(
+    fixtureModel("nvidia", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning").reasoningOptions,
+  ).toEqual([{ type: "toggle" }, { type: "budget_tokens", min: -1, max: 32768 }]);
+});
+
+test("month-only dates are stored verbatim", () => {
+  expect(fixtureModel("deepinfra", "Qwen/Qwen3-32B")).toMatchObject({
+    knowledge: "2025-04",
+    releaseDate: "2025-04",
+    lastUpdated: "2025-04",
+  });
+  expect(
+    normalizeModel("p", "m", {
+      ...rawModel(fixtureCatalog, "openai", "gpt-5-mini"),
+      release_date: "2024-02-29",
+    })?.releaseDate,
+  ).toBe("2024-02-29");
+});
+
+test("model type is stored verbatim and absent for language models", () => {
+  expect(fixtureModel("novita-ai", "qwen/qwen3-embedding-8b").type).toBe("embedding");
+  expect(fixtureModel("openai", "gpt-5-mini").type).toBeUndefined();
+});
+
+test("an unknown status is dropped and the model is kept", () => {
+  const row = normalizeModel("p", "m", {
+    ...rawModel(fixtureCatalog, "openai", "gpt-5-mini"),
+    status: "preview",
+  });
+  expect(row).not.toBeNull();
+  expect(row?.status).toBeUndefined();
+  expect(fixtureModel("azure", "deepseek-v4.1-flash").status).toBe("beta");
+});
+
+test("limits are stored as the upstream limit object", () => {
+  expect(fixtureModel("deepinfra", "Qwen/Qwen3-32B")).toMatchObject({
+    limit: { context: 40960, output: 16384 },
+    contextTokens: 40960,
+  });
+  expect(
+    normalizeModel("p", "m", {
+      ...rawModel(fixtureCatalog, "openai", "gpt-5-mini"),
+      limit: { context: 1000, input: 800, output: 200 },
+    })?.limit,
+  ).toEqual({ context: 1000, input: 800, output: 200 });
+});
+
+test("the upstream provider override is stored with its shape", () => {
+  expect(fixtureModel("azure", "deepseek-v4.1-flash").providerOverride).toEqual({
+    npm: "@ai-sdk/openai-compatible",
+    api: "https://${AZURE_RESOURCE_NAME}.services.ai.azure.com/models",
+    shape: "completions",
+  });
+});
+
+test("an interleaved object is stored", () => {
+  expect(fixtureModel("deepseek", "deepseek-v4-flash-vision-exp").interleaved).toEqual({
+    field: "reasoning_content",
+  });
 });

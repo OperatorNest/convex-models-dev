@@ -1,5 +1,5 @@
 import { isModelsDevError, modelsDevError, type ModelsDevErrorData } from "../shared/errors.js";
-import { jsonBytes, wellFormed } from "../shared/bounds.js";
+import { jsonBytes } from "../shared/bounds.js";
 import type { Id } from "./_generated/dataModel.js";
 import { internal } from "./_generated/api.js";
 import type { ActionCtx } from "./_generated/server.js";
@@ -14,6 +14,7 @@ import {
 } from "../shared/normalize.js";
 import type {
   ModelInput,
+  PartialReason,
   ProviderInput,
   SyncSummary,
   SyncSourceError,
@@ -28,7 +29,7 @@ const MAX_CATALOG_BYTES = 16 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 60_000;
 const REMOVAL_GUARD_FRACTION = 0.2;
 
-type PriorState = { source: string; etag?: string; contentHash?: string } | undefined;
+type PriorState = { sourceUrl: string; etag?: string; contentHash?: string } | undefined;
 
 type Loaded =
   | { kind: "not_modified"; url: string; etag?: string; contentHash?: string }
@@ -51,29 +52,43 @@ function failureData(
   error: unknown,
   code: "MODELS_DEV_NETWORK_ERROR" | "MODELS_DEV_SYNC_FAILED",
 ): ModelsDevErrorData {
-  return isModelsDevError(error) ? error.data : modelsDevError(code).data;
+  if (isModelsDevError(error)) return error.data;
+  return code === "MODELS_DEV_NETWORK_ERROR"
+    ? modelsDevError(code, { retryable: true }).data
+    : modelsDevError(code).data;
 }
+const INITIAL_BUFFER_BYTES = 1024 * 1024;
+
 async function readCatalog(response: Response): Promise<Uint8Array<ArrayBuffer>> {
-  const length = Number(response.headers.get("content-length"));
-  if (length > MAX_CATALOG_BYTES) {
+  const declared = Number(response.headers.get("content-length") ?? Number.NaN);
+  if (declared > MAX_CATALOG_BYTES) {
     await response.body?.cancel();
     throw modelsDevError("MODELS_DEV_CATALOG_TOO_LARGE");
   }
   if (!response.body) throw modelsDevError("MODELS_DEV_INVALID_RESPONSE");
   const reader = response.body.getReader();
-  const buffer = new ArrayBuffer(MAX_CATALOG_BYTES);
-  const data = new Uint8Array(buffer);
+  let data = new Uint8Array(
+    Number.isSafeInteger(declared) && declared > 0 ? declared : INITIAL_BUFFER_BYTES,
+  );
   let bytes = 0;
   try {
     for (;;) {
       const chunk = await reader.read();
       if (chunk.done) break;
-      if (bytes + chunk.value.byteLength > MAX_CATALOG_BYTES) {
+      const needed = bytes + chunk.value.byteLength;
+      if (needed > MAX_CATALOG_BYTES) {
         await reader.cancel();
         throw modelsDevError("MODELS_DEV_CATALOG_TOO_LARGE");
       }
+      if (needed > data.byteLength) {
+        let capacity = data.byteLength;
+        while (capacity < needed) capacity *= 2;
+        const grown = new Uint8Array(Math.min(capacity, MAX_CATALOG_BYTES));
+        grown.set(data.subarray(0, bytes));
+        data = grown;
+      }
       data.set(chunk.value, bytes);
-      bytes += chunk.value.byteLength;
+      bytes = needed;
     }
   } finally {
     reader.releaseLock();
@@ -86,7 +101,7 @@ async function loadCatalog(
   state: PriorState,
   config: EffectiveConfig,
 ): Promise<Loaded> {
-  const sameSource = state?.source === url;
+  const sameSource = state?.sourceUrl === url;
   const headers: Record<string, string> = {
     "user-agent": USER_AGENT,
     accept: "application/json",
@@ -110,10 +125,7 @@ async function loadCatalog(
       });
     }
     const responseEtag = response.headers.get("etag");
-    etag =
-      responseEtag && wellFormed(responseEtag) && responseEtag.length <= 2048
-        ? responseEtag
-        : undefined;
+    etag = responseEtag?.isWellFormed() && responseEtag.length <= 2048 ? responseEtag : undefined;
     buffer = await readCatalog(response);
   } finally {
     clearTimeout(timer);
@@ -186,9 +198,9 @@ async function applyCatalog(
 
   const providerRows: ProviderInput[] = [];
   for (const [modelsDevProviderId, provider] of Object.entries(catalog)) {
-    const models = isRecord(provider) ? provider.models : undefined;
-    const count = isRecord(models) ? Object.keys(models).length : 0;
-    const row = isRecord(models) ? normalizeProvider(modelsDevProviderId, provider, count) : null;
+    const modelCount = loaded.shape.modelCountByProvider.get(modelsDevProviderId);
+    if (modelCount === undefined) continue;
+    const row = normalizeProvider(modelsDevProviderId, provider, modelCount);
     if (!row) continue;
     usableProviders.add(modelsDevProviderId);
     providerRows.push({ ...row, contentHash: await rowHash(row) });
@@ -211,7 +223,7 @@ async function applyCatalog(
     if (row && !row.hasCost) lostPrices++;
   }
   if (!opts.force && lostPrices > priced * REMOVAL_GUARD_FRACTION)
-    return { ...totals, removalSkipped: true };
+    return { ...totals, partialReason: "price_loss" as const };
 
   let providers: ProviderInput[] = [];
   let providerBytes = 0;
@@ -280,10 +292,10 @@ async function applyCatalog(
     .map((entry) => entry.modelId);
   const existing = snapshot.length;
 
-  let removalSkipped = false;
+  let partialReason: PartialReason | undefined;
   if (stale.length > 0) {
     if (!opts.force && stale.length > existing * REMOVAL_GUARD_FRACTION) {
-      removalSkipped = true;
+      partialReason = "removal";
     } else {
       for (let i = 0; i < stale.length; i += CHUNK_SIZE) {
         const result = await ctx.runMutation(internal.sync.removeModels, {
@@ -309,7 +321,7 @@ async function applyCatalog(
     if (page.isDone) break;
     providerCursor = page.continueCursor;
   }
-  if (staleProviders.length > 0 && !removalSkipped) {
+  if (staleProviders.length > 0 && partialReason === undefined) {
     for (let i = 0; i < staleProviders.length; i += CHUNK_SIZE) {
       const result = await ctx.runMutation(internal.sync.removeProviders, {
         runId: opts.runId,
@@ -319,7 +331,7 @@ async function applyCatalog(
     }
   }
 
-  return { ...totals, removalSkipped };
+  return { ...totals, partialReason };
 }
 
 function pageModels(ctx: ActionCtx, cursor: string | null) {
@@ -347,6 +359,11 @@ export async function runSync(
   const urls = [...new Set([config.sourceUrl, FALLBACK_SOURCE_URL])];
   const errors: SyncSourceError[] = [];
   let activeSource: SyncSourceError["source"] = "primary";
+  const recordFailure = async (): Promise<SyncSummary> => {
+    const durationMs = Date.now() - started;
+    await ctx.runMutation(internal.sync.finish, { runId, status: "error", errors, durationMs });
+    return { status: "error", errors, durationMs };
+  };
   try {
     let loaded: Loaded | undefined;
     for (const [index, url] of urls.entries()) {
@@ -358,10 +375,7 @@ export async function runSync(
         errors.push({ source: activeSource, ...failureData(error, "MODELS_DEV_NETWORK_ERROR") });
       }
     }
-    if (!loaded) {
-      const failure = errors[0] ?? modelsDevError("MODELS_DEV_PROVIDER_ERROR").data;
-      throw modelsDevError(failure.code, failure);
-    }
+    if (!loaded) return await recordFailure();
 
     if (loaded.kind === "not_modified") {
       const durationMs = Date.now() - started;
@@ -369,13 +383,13 @@ export async function runSync(
         runId,
         status: "not_modified",
         errors,
-        source: loaded.url,
+        sourceUrl: loaded.url,
         ...(loaded.etag && { etag: loaded.etag }),
         ...(loaded.contentHash && { contentHash: loaded.contentHash }),
         durationMs,
       });
       if (!recorded) throw new LeaseLost();
-      return { status: "not_modified", source: loaded.url, durationMs, errors };
+      return { status: "not_modified", sourceUrl: loaded.url, durationMs, errors };
     }
 
     const stats = await applyCatalog(ctx, loaded, {
@@ -392,22 +406,30 @@ export async function runSync(
       removed: stats.removed,
       priceChanges: stats.priceChanges,
       skippedModels: stats.skippedModels,
-      removalSkipped: stats.removalSkipped,
     };
 
-    const status = stats.removalSkipped ? "partial" : "ok";
+    const partialReason = stats.partialReason;
+    const status = partialReason === undefined ? "ok" : "partial";
     const recorded = await ctx.runMutation(internal.sync.finish, {
       runId,
       status,
+      ...(partialReason && { partialReason }),
       errors,
-      source: loaded.url,
+      sourceUrl: loaded.url,
       ...(loaded.etag && { etag: loaded.etag }),
       contentHash: loaded.contentHash,
       stats: finalStats,
       durationMs,
     });
     if (!recorded) throw new LeaseLost();
-    return { status, source: loaded.url, ...finalStats, durationMs, errors };
+    return {
+      status,
+      ...(partialReason && { partialReason }),
+      sourceUrl: loaded.url,
+      ...finalStats,
+      durationMs,
+      errors,
+    };
   } catch (error) {
     if (error instanceof LeaseLost) {
       return {
@@ -422,12 +444,6 @@ export async function runSync(
     const data = failureData(error, "MODELS_DEV_SYNC_FAILED");
     if (!errors.some((entry) => entry.source === activeSource))
       errors.push({ source: activeSource, ...data });
-    await ctx.runMutation(internal.sync.finish, {
-      runId,
-      status: "error",
-      errors,
-      durationMs: Date.now() - started,
-    });
-    return { status: "error", errors, durationMs: Date.now() - started };
+    return await recordFailure();
   }
 }

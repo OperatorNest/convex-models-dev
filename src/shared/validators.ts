@@ -57,10 +57,16 @@ export const reasoningOptionValidator = v.union(
 
 export const interleavedValidator = v.union(v.literal(true), v.object({ field: v.string() }));
 
-export const providerValidator = v.object({
+export const providerOverrideValidator = v.object({
   npm: v.optional(v.string()),
   api: v.optional(v.string()),
   shape: v.optional(v.string()),
+});
+
+export const modelLimitValidator = v.object({
+  context: v.number(),
+  input: v.optional(v.number()),
+  output: v.number(),
 });
 
 export const modelFields = {
@@ -71,6 +77,7 @@ export const modelFields = {
   family: v.optional(v.string()),
   description: v.optional(v.string()),
   searchText: v.string(),
+  type: v.optional(v.string()),
 
   attachment: v.boolean(),
   reasoning: v.boolean(),
@@ -84,9 +91,8 @@ export const modelFields = {
   reasoningOptions: v.optional(v.array(reasoningOptionValidator)),
   interleaved: v.optional(interleavedValidator),
 
-  context: v.number(),
-  output: v.number(),
-  input: v.optional(v.number()),
+  limit: modelLimitValidator,
+  contextTokens: v.number(),
 
   releaseDate: v.string(),
   lastUpdated: v.string(),
@@ -104,7 +110,7 @@ export const modelFields = {
   costOrder: v.number(),
   tiers: v.optional(v.array(tierValidator)),
   modes: v.optional(modesValidator),
-  provider: v.optional(providerValidator),
+  providerOverride: v.optional(providerOverrideValidator),
 };
 
 const modelRowValidator = v.object(modelFields);
@@ -204,6 +210,10 @@ export const lastStatusValidator = v.union(
   v.literal("error"),
 );
 
+export const partialReasonValidator = v.union(v.literal("price_loss"), v.literal("removal"));
+/** Names the catalog-loss guard that made a sync run partial. */
+export type PartialReason = Infer<typeof partialReasonValidator>;
+
 export const syncStateValidator = v.union(
   v.literal("never_synced"),
   v.literal("ok"),
@@ -218,7 +228,6 @@ export const syncCountsFields = {
   removed: v.number(),
   priceChanges: v.number(),
   skippedModels: v.number(),
-  removalSkipped: v.boolean(),
 };
 
 export const syncSourceErrorValidator = v.object({
@@ -233,10 +242,11 @@ export const syncStatusValidator = v.object({
 
   running: v.boolean(),
   leaseExpiresAt: v.optional(v.number()),
-  source: v.optional(v.string()),
+  sourceUrl: v.optional(v.string()),
   lastCheckedAt: v.optional(v.number()),
   lastSyncedAt: v.optional(v.number()),
   lastStatus: v.optional(lastStatusValidator),
+  partialReason: v.optional(partialReasonValidator),
   errors: v.array(syncSourceErrorValidator),
   ...syncCountsFields,
   durationMs: v.number(),
@@ -255,8 +265,9 @@ export type SyncSkipReason = Infer<typeof syncSkipReasonValidator>;
 export const syncSummaryValidator = v.object({
   status: v.union(lastStatusValidator, v.literal("skipped")),
   reason: v.optional(syncSkipReasonValidator),
+  partialReason: v.optional(partialReasonValidator),
   errors: v.array(syncSourceErrorValidator),
-  source: v.optional(v.string()),
+  sourceUrl: v.optional(v.string()),
   durationMs: v.optional(v.number()),
   ...v.object(syncCountsFields).partial().fields,
 });

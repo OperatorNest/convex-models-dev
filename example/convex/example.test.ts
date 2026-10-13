@@ -54,7 +54,7 @@ test("app syncs through the client and reads the catalog", async () => {
   );
   const cheap = await t.query(api.example.cheapestWithTools, { minContextTokens: 1_000_000 });
   expect(cheap.models.length).toBeGreaterThan(0);
-  expect(cheap.models.every((m) => m.context >= 1_000_000)).toBe(true);
+  expect(cheap.models.every((m) => m.contextTokens >= 1_000_000)).toBe(true);
 
   expect(await t.action(internal.example.syncForced, {})).toMatchObject({
     status: "not_modified",

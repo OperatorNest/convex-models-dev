@@ -1,7 +1,14 @@
 import { modelsDevError } from "./errors.js";
 import { isRecord } from "./guards.js";
-import { jsonBytes, utf8Bytes, wellFormed } from "./bounds.js";
-import type { ModelRow, CostFields, CostTier, PricingSnapshot, ProviderRow } from "./validators.js";
+import { jsonBytes, utf8Bytes } from "./bounds.js";
+import type {
+  ModelRow,
+  ModelStatus,
+  CostFields,
+  CostTier,
+  PricingSnapshot,
+  ProviderRow,
+} from "./validators.js";
 
 const MODALITY_BITS: Record<string, number> = { text: 1, audio: 2, image: 4, video: 8, pdf: 16 };
 const MODE_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
@@ -27,7 +34,7 @@ class Invalid extends Error {}
 type Obj = Record<string, unknown>;
 
 function validStored(value: unknown): boolean {
-  if (typeof value === "string") return wellFormed(value) && utf8Bytes(value) <= 16384;
+  if (typeof value === "string") return value.isWellFormed() && utf8Bytes(value) <= 16384;
   if (typeof value === "number") return Number.isFinite(value);
   if (Array.isArray(value)) return value.length <= 128 && value.every(validStored);
   if (isRecord(value))
@@ -40,15 +47,20 @@ function validStored(value: unknown): boolean {
 function rowFits(value: unknown): boolean {
   return validStored(value) && jsonBytes(value) <= 65536;
 }
+const DATE_SHAPE = /^(\d{4})-(\d{2})(?:-(\d{2}))?$/;
+
 function date(o: Obj, key: string): string {
   const value = reqString(o, key);
-  const parsed = new Date(value);
-  if (
-    !/^\d{4}-\d{2}-\d{2}$/.test(value) ||
-    !Number.isFinite(parsed.getTime()) ||
-    parsed.toISOString().slice(0, 10) !== value
-  )
-    throw new Invalid(key);
+  const match = DATE_SHAPE.exec(value);
+  if (!match) throw new Invalid(key);
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (month < 1 || month > 12) throw new Invalid(key);
+  if (match[3] === undefined) return value;
+  const day = Number(match[3]);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = month === 2 ? (leapYear ? 29 : 28) : [4, 6, 9, 11].includes(month) ? 30 : 31;
+  if (day < 1 || day > daysInMonth) throw new Invalid(key);
   return value;
 }
 function reqString(o: Obj, key: string): string {
@@ -77,15 +89,15 @@ function optBool(o: Obj, key: string): boolean | undefined {
   return value;
 }
 
-function num(value: unknown, key: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new Invalid(key);
+function num(value: unknown, key: string, min = 0): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < min) throw new Invalid(key);
   return value;
 }
 
-function optNum(o: Obj, key: string): number | undefined {
+function optNum(o: Obj, key: string, min = 0): number | undefined {
   const value = o[key];
   if (value === undefined || value === null) return undefined;
-  return num(value, key);
+  return num(value, key, min);
 }
 
 function strings(value: unknown, key: string): string[] {
@@ -151,7 +163,7 @@ function parseReasoningOptions(raw: unknown): ModelRow["reasoningOptions"] {
         ),
       });
     } else if (entry.type === "budget_tokens") {
-      const min = optNum(entry, "min");
+      const min = optNum(entry, "min", -1);
       const max = optNum(entry, "max");
       if (min !== undefined && max !== undefined && min > max) throw new Invalid("budget_tokens");
       out.push({
@@ -162,6 +174,10 @@ function parseReasoningOptions(raw: unknown): ModelRow["reasoningOptions"] {
     }
   }
   return out;
+}
+
+function modelStatus(value: unknown): ModelStatus | undefined {
+  return value === "alpha" || value === "beta" || value === "deprecated" ? value : undefined;
 }
 
 function parseModes(raw: unknown): ModelRow["modes"] {
@@ -193,6 +209,8 @@ export function normalizeModel(
     const inputModalities = strings(modalities.input, "modalities.input");
     const outputModalities = strings(modalities.output, "modalities.output");
     const family = optString(raw, "family");
+    const context = num(limit.context, "limit.context");
+    const input = optNum(limit, "input");
 
     const row: ModelRow = {
       modelsDevProviderId,
@@ -206,8 +224,12 @@ export function normalizeModel(
       openWeights: reqBool(raw, "open_weights"),
       inputMask: modalityMask(inputModalities),
       outputMask: modalityMask(outputModalities),
-      context: num(limit.context, "limit.context"),
-      output: num(limit.output, "limit.output"),
+      limit: {
+        context,
+        ...(input !== undefined && { input }),
+        output: num(limit.output, "limit.output"),
+      },
+      contextTokens: context,
       releaseDate: date(raw, "release_date"),
       lastUpdated: date(raw, "last_updated"),
       hasCost: false,
@@ -217,16 +239,13 @@ export function normalizeModel(
       if (value !== undefined) row[key] = value;
     };
     assign("modelsDevCanonicalModelId", optString(raw, "canonical_model_id"));
+    assign("type", optString(raw, "type"));
     assign("family", family);
     assign("description", optString(raw, "description"));
     assign("structuredOutput", optBool(raw, "structured_output"));
     assign("temperature", optBool(raw, "temperature"));
-    const status = optString(raw, "status");
-    if (status !== undefined && status !== "alpha" && status !== "beta" && status !== "deprecated")
-      throw new Invalid("status");
-    assign("status", status);
+    assign("status", modelStatus(raw.status));
     assign("knowledge", optString(raw, "knowledge"));
-    assign("input", optNum(limit, "input"));
     assign("reasoningOptions", parseReasoningOptions(raw.reasoning_options));
     if (raw.interleaved === true) row.interleaved = true;
     else if (isRecord(raw.interleaved) && typeof raw.interleaved.field === "string") {
@@ -255,11 +274,11 @@ export function normalizeModel(
 
     const provider = raw.provider;
     if (isRecord(provider)) {
-      const override: NonNullable<ModelRow["provider"]> = {};
+      const override: NonNullable<ModelRow["providerOverride"]> = {};
       if (typeof provider.npm === "string") override.npm = provider.npm;
       if (typeof provider.api === "string") override.api = provider.api;
       if (typeof provider.shape === "string") override.shape = provider.shape;
-      if (Object.keys(override).length > 0) row.provider = override;
+      if (Object.keys(override).length > 0) row.providerOverride = override;
     }
     return rowFits(row) &&
       INDEX_STRING_FIELDS.every((field) => {
@@ -281,7 +300,7 @@ export function normalizeProvider(
 ): ProviderRow | null {
   if (
     !isRecord(raw) ||
-    !wellFormed(modelsDevProviderId) ||
+    !modelsDevProviderId.isWellFormed() ||
     utf8Bytes(modelsDevProviderId) > INDEX_STRING_BYTES
   )
     return null;
@@ -303,16 +322,22 @@ export function normalizeProvider(
   }
 }
 
-export type CatalogShape = { providerCount: number; modelCount: number; skippedModels: number };
+export type CatalogShape = {
+  providerCount: number;
+  modelCount: number;
+  skippedModels: number;
+  modelCountByProvider: Map<string, number>;
+};
 
 export function inspectCatalog(raw: unknown): CatalogShape {
   if (!isRecord(raw)) throw modelsDevError("MODELS_DEV_INVALID_RESPONSE");
   let providerCount = 0;
   let modelCount = 0;
   let skippedModels = 0;
+  const modelCountByProvider = new Map<string, number>();
   for (const [modelsDevProviderId, provider] of Object.entries(raw)) {
     if (!isRecord(provider) || !isRecord(provider.models)) continue;
-    if (!normalizeProvider(modelsDevProviderId, provider, Object.keys(provider.models).length)) {
+    if (!normalizeProvider(modelsDevProviderId, provider, 0)) {
       skippedModels += Object.keys(provider.models).length;
       continue;
     }
@@ -321,10 +346,11 @@ export function inspectCatalog(raw: unknown): CatalogShape {
       if (normalizeModel(modelsDevProviderId, modelsDevModelId, model)) usable++;
       else skippedModels++;
     }
+    modelCountByProvider.set(modelsDevProviderId, usable);
     if (usable > 0) providerCount++;
     modelCount += usable;
   }
-  return { providerCount, modelCount, skippedModels };
+  return { providerCount, modelCount, skippedModels, modelCountByProvider };
 }
 
 export function pricingOf(row: ModelRow | undefined | null): PricingSnapshot | undefined {

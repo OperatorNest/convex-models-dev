@@ -1,5 +1,7 @@
 import { ConvexError } from "convex/values";
+import { truncateText } from "./bounds.js";
 
+// repository-codes:begin
 export const MODELS_DEV_ERROR_CODES = [
   "MODELS_DEV_INVALID_ARGUMENT",
   "MODELS_DEV_PROVIDER_ERROR",
@@ -10,16 +12,11 @@ export const MODELS_DEV_ERROR_CODES = [
   "MODELS_DEV_SYNC_FAILED",
   "MODELS_DEV_LEASE_LOST",
 ] as const;
-/** Identifies the caller action required after a catalog operation fails. */
-export type ModelsDevErrorCode = (typeof MODELS_DEV_ERROR_CODES)[number];
-/** Describes a catalog failure without exposing provider response content. */
-export type ModelsDevErrorData = {
-  code: ModelsDevErrorCode;
-  message: string;
-  retryable?: boolean;
-  providerStatus?: number;
-  providerCode?: string;
-};
+
+const MODELS_DEV_PROVIDER_ERROR_CODES = [
+  "MODELS_DEV_PROVIDER_ERROR",
+  "MODELS_DEV_NETWORK_ERROR",
+] as const satisfies readonly ModelsDevErrorCode[];
 
 const MODELS_DEV_ERROR_MESSAGES = {
   MODELS_DEV_INVALID_ARGUMENT: "An argument is malformed or outside its bounds.",
@@ -31,44 +28,80 @@ const MODELS_DEV_ERROR_MESSAGES = {
   MODELS_DEV_SYNC_FAILED: "The catalog write failed.",
   MODELS_DEV_LEASE_LOST: "The sync run no longer owns its lease.",
 } as const satisfies Record<ModelsDevErrorCode, string>;
+// repository-codes:end
 
-export function modelsDevError(
-  code: ModelsDevErrorCode,
-  details?: { providerStatus?: number; providerCode?: string; retryable?: boolean },
+const ERROR_DATA_KEYS: ReadonlySet<string> = new Set([
+  "code",
+  "message",
+  "retryable",
+  "providerStatus",
+  "providerCode",
+]);
+
+/** One fixed caller-visible failure; `MODELS_DEV_ERROR_CODES` lists every code. */
+export type ModelsDevErrorCode = (typeof MODELS_DEV_ERROR_CODES)[number];
+
+/** Error data: the code, its fixed message and bounded provider failure details. `retryable` is present exactly on provider-originated codes. */
+export type ModelsDevErrorData = {
+  code: ModelsDevErrorCode;
+  message: string;
+  retryable?: boolean;
+  providerStatus?: number;
+  providerCode?: string;
+};
+
+type ProviderErrorCode = (typeof MODELS_DEV_PROVIDER_ERROR_CODES)[number];
+
+type ErrorDetails<Code extends ModelsDevErrorCode> = [Code] extends [
+  Exclude<ModelsDevErrorCode, ProviderErrorCode>,
+]
+  ? [details?: { retryable?: never; providerStatus?: number; providerCode?: string }]
+  : [details: { retryable: boolean; providerStatus?: number; providerCode?: string }];
+
+function isProviderErrorCode(code: unknown): code is ProviderErrorCode {
+  return MODELS_DEV_PROVIDER_ERROR_CODES.some((candidate) => candidate === code);
+}
+
+/** Creates the error for `code` with its fixed message. Provider-originated codes require `details.retryable`; other codes forbid it. `providerCode` is truncated to 64 characters. */
+export function modelsDevError<Code extends ModelsDevErrorCode>(
+  code: Code,
+  ...[details]: ErrorDetails<Code>
 ): ConvexError<ModelsDevErrorData> {
-  const providerFailure =
-    code === "MODELS_DEV_PROVIDER_ERROR" || code === "MODELS_DEV_NETWORK_ERROR";
   return new ConvexError({
     code,
     message: MODELS_DEV_ERROR_MESSAGES[code],
-    ...(providerFailure && {
-      retryable: details?.retryable ?? code === "MODELS_DEV_NETWORK_ERROR",
-    }),
+    ...(isProviderErrorCode(code) &&
+      details?.retryable !== undefined && { retryable: details.retryable }),
     ...(details?.providerStatus !== undefined && { providerStatus: details.providerStatus }),
-    ...(details?.providerCode !== undefined && { providerCode: details.providerCode.slice(0, 64) }),
+    ...(details?.providerCode !== undefined && {
+      providerCode: truncateText(details.providerCode, 64),
+    }),
   });
 }
-/** Recognizes catalog errors with the fixed message and valid provider diagnostics. */
+
+/** Returns true when `error` carries exactly a known code, its fixed message, `retryable` on provider-originated codes only, and well-formed provider details. */
 export function isModelsDevError(error: unknown): error is ConvexError<ModelsDevErrorData> {
   if (!(error instanceof ConvexError)) return false;
   const data: unknown = error.data;
-  if (typeof data !== "object" || data === null || !("code" in data)) return false;
-  const code = MODELS_DEV_ERROR_CODES.find((candidate) => candidate === data.code);
-  if (!code || !("message" in data) || data.message !== MODELS_DEV_ERROR_MESSAGES[code])
+  if (typeof data !== "object" || data === null || !("code" in data) || !("message" in data))
     return false;
+  const { code, message } = data;
   return (
-    Object.keys(data).every((key) =>
-      ["code", "message", "retryable", "providerStatus", "providerCode"].includes(key),
+    Object.keys(data).every((key) => ERROR_DATA_KEYS.has(key)) &&
+    MODELS_DEV_ERROR_CODES.some(
+      (candidate) => candidate === code && message === MODELS_DEV_ERROR_MESSAGES[candidate],
     ) &&
-    (!("retryable" in data) ||
-      ((code === "MODELS_DEV_PROVIDER_ERROR" || code === "MODELS_DEV_NETWORK_ERROR") &&
-        typeof data.retryable === "boolean")) &&
-    (!("providerCode" in data) ||
-      (typeof data.providerCode === "string" && data.providerCode.length <= 64)) &&
+    ("retryable" in data
+      ? isProviderErrorCode(code) && typeof data.retryable === "boolean"
+      : !isProviderErrorCode(code)) &&
     (!("providerStatus" in data) ||
       (typeof data.providerStatus === "number" &&
         Number.isInteger(data.providerStatus) &&
         data.providerStatus >= 100 &&
-        data.providerStatus <= 599))
+        data.providerStatus <= 599)) &&
+    (!("providerCode" in data) ||
+      (typeof data.providerCode === "string" &&
+        data.providerCode.isWellFormed() &&
+        data.providerCode.length <= 64))
   );
 }

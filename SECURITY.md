@@ -6,7 +6,7 @@ Report vulnerabilities in `@operatornest/convex-models-dev` through the package 
 
 The app authenticates and authorizes callers before invoking `ModelsDev`. Report paths that bypass those boundaries or disclose component credentials prefixed `MODELS_DEV_`.
 
-## Catalog boundaries
+## Boundaries
 
 The component stores catalog data and sync settings, declares no environment variables and holds no credentials. Outbound requests are GETs to the configured HTTPS source and, on failure, `https://models.opencode.ai/api.json`. The configured source defaults to `https://models.dev/api.json`.
 

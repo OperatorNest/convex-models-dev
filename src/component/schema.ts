@@ -3,6 +3,7 @@ import { v } from "convex/values";
 import {
   lastStatusValidator,
   modelFields,
+  partialReasonValidator,
   priceChangeKindValidator,
   pricingSnapshotValidator,
   providerFields,
@@ -35,9 +36,9 @@ export default defineSchema({
     .index("by_modelsDevProviderId_and_releaseDate", ["modelsDevProviderId", "releaseDate"])
     .index("by_family_and_releaseDate", ["family", "releaseDate"])
     .index("by_releaseDate", ["releaseDate"])
-    .index("by_context", ["context"])
-    .index("by_modelsDevProviderId_and_context", ["modelsDevProviderId", "context"])
-    .index("by_family_and_context", ["family", "context"])
+    .index("by_contextTokens", ["contextTokens"])
+    .index("by_modelsDevProviderId_and_contextTokens", ["modelsDevProviderId", "contextTokens"])
+    .index("by_family_and_contextTokens", ["family", "contextTokens"])
     .index("by_modelsDevProviderId_and_costBlended", ["modelsDevProviderId", "costBlended"])
     .index("by_family_and_costBlended", ["family", "costBlended"])
     .index("by_costBlended", ["costBlended"])
@@ -47,12 +48,13 @@ export default defineSchema({
     }),
 
   syncState: defineTable({
-    source: v.string(),
+    sourceUrl: v.string(),
     etag: v.optional(v.string()),
     contentHash: v.optional(v.string()),
     lastCheckedAt: v.number(),
     lastSyncedAt: v.optional(v.number()),
     lastStatus: v.optional(lastStatusValidator),
+    partialReason: v.optional(partialReasonValidator),
     errors: v.array(syncSourceErrorValidator),
     ...syncCountsFields,
     durationMs: v.number(),

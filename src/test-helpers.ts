@@ -1,46 +1,63 @@
 import { convexTest } from "convex-test";
-import { vi } from "vitest";
+import { expect, vi } from "vitest";
 import { api } from "./component/_generated/api.js";
 import schema from "./component/schema.js";
-import type { ImportMetaGlob } from "./import-meta.js";
+import { isModelsDevError, type ModelsDevErrorCode } from "./shared/errors.js";
 
-const modules: ReturnType<ImportMetaGlob> = import.meta.glob([
+// shared-block:begin
+type GlobImportMeta = ImportMeta & {
+  glob: (patterns: string[]) => Record<string, () => Promise<unknown>>;
+};
+const modules = (import.meta as GlobImportMeta).glob([
   "./component/**/*.ts",
   "!./component/**/*.test.ts",
 ]);
 
-export function componentTest() {
-  return convexTest(schema, modules);
-}
-export type ComponentTest = ReturnType<typeof componentTest>;
-
-export async function relaxGuards(t: ComponentTest) {
-  await t.mutation(api.config.update, { minProviders: 1, minModels: 1 });
+export function setupTest() {
+  const t = convexTest(schema, modules);
+  return t;
 }
 
-export function requireValue<Value>(value: Value | null | undefined): Value {
-  if (value === null || value === undefined) throw new Error("expected a value");
+export type TestCtx = ReturnType<typeof setupTest>;
+
+export async function drain(t: Pick<TestCtx, "finishAllScheduledFunctions">): Promise<void> {
+  await t.finishAllScheduledFunctions(vi.runAllTimers);
+}
+
+export function required<T>(value: T | null | undefined, what: string): T {
+  if (value === null || value === undefined) throw new Error(`Expected ${what} to exist`);
   return value;
 }
 
-export type FetchCall = { url: string; headers: Record<string, string> };
+export type FetchCall = { url: string; init: RequestInit };
 
-export function stubFetch(handler: (call: FetchCall) => Response | Promise<Response>) {
+export function stubFetch(
+  respond: (call: FetchCall, index: number) => Response | Promise<Response>,
+): FetchCall[] {
   const calls: FetchCall[] = [];
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const headers: Record<string, string> = {};
-      new Headers(init?.headers).forEach((value, key) => {
-        headers[key] = value;
-      });
-      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-      const call = { url, headers };
-      calls.push(call);
-      return handler(call);
-    }),
-  );
+  vi.stubGlobal("fetch", async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const call = { url: input instanceof Request ? input.url : String(input), init };
+    calls.push(call);
+    return respond(call, calls.length - 1);
+  });
   return calls;
+}
+
+export async function expectModelsDevError(
+  promise: Promise<unknown>,
+  code: ModelsDevErrorCode,
+): Promise<void> {
+  const error = await promise.then(
+    () => undefined,
+    (caught: unknown) => caught,
+  );
+  expect(isModelsDevError(error), String(error)).toBe(true);
+  if (isModelsDevError(error)) expect(error.data.code).toBe(code);
+}
+// shared-block:end
+
+export async function relaxGuards(t: TestCtx) {
+  await t.mutation(api.config.update, { minProviders: 1, minModels: 1 });
 }
 
 export function catalogServer(initial: { body: string; etag?: string }) {
@@ -56,7 +73,8 @@ export function catalogServer(initial: { body: string; etag?: string }) {
     if (server.failPrimary && call.url.startsWith("https://models.dev/")) {
       return new Response("boom", { status: 500 });
     }
-    if (call.headers["if-none-match"] === server.etag) return new Response(null, { status: 304 });
+    if (new Headers(call.init.headers).get("if-none-match") === server.etag)
+      return new Response(null, { status: 304 });
     return new Response(server.body, { status: 200, headers: { etag: server.etag } });
   });
   return server;

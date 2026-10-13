@@ -1,7 +1,14 @@
 import { listCheapest } from "./models.js";
 import { afterEach, expect, test, vi, describe } from "vitest";
 import { api, internal } from "./_generated/api.js";
-import { catalogServer, componentTest, relaxGuards, requireValue } from "../test-helpers.js";
+import {
+  catalogServer,
+  expectModelsDevError,
+  relaxGuards,
+  required,
+  setupTest,
+  type TestCtx,
+} from "../test-helpers.js";
 import {
   fixtureJson,
   fixtureModel,
@@ -18,7 +25,7 @@ import { normalizeModel } from "../shared/normalize.js";
 import { estimateCost } from "../shared/cost.js";
 
 async function syncedCatalog(mutate?: (c: Catalog) => void) {
-  const t = componentTest();
+  const t = setupTest();
   await relaxGuards(t);
   catalogServer({ body: fixtureJson(mutate) });
   await t.action(api.sync.runForced, {});
@@ -108,8 +115,11 @@ describe("providers", () => {
     expect(providers.map((p) => p.modelsDevProviderId).toSorted()).toEqual([
       "anthropic",
       "azure",
+      "deepinfra",
       "deepseek",
       "google",
+      "novita-ai",
+      "nvidia",
       "openai",
     ]);
     expect(providers).toHaveLength(FIXTURE_PROVIDER_COUNT);
@@ -159,6 +169,7 @@ describe("list", () => {
       "google/gemini-2.5-flash",
       "google/gemini-2.5-pro",
       "google/gemini-3.5-flash",
+      "nvidia/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
     ]);
     expect(
       await list({ inputModalities: ["audio", "video"], modelsDevProviderId: "google" }),
@@ -176,13 +187,15 @@ describe("list", () => {
       ]),
     );
     expect(await list({ maxCostInput: 0.3 })).not.toContain("openai/gpt-image-1-mini");
-    expect(await list({ modelsDevProviderId: "azure", openWeights: true })).toEqual([]);
+    expect(await list({ modelsDevProviderId: "azure", openWeights: true })).toEqual([
+      "azure/deepseek-v4.1-flash",
+    ]);
   });
 
   test("order by context and by cost", async () => {
     const t = await syncedCatalog();
     const byContext = await t.query(api.models.list, { order: "context", paginationOpts: page });
-    const contexts = byContext.page.map((m) => m.context);
+    const contexts = byContext.page.map((m) => m.limit.context);
     expect(contexts).toEqual([...contexts].toSorted((a, b) => b - a));
     const byCost = await t.query(api.models.list, { order: "cost", paginationOpts: page });
     const costs = byCost.page.map((m) => m.costBlended);
@@ -236,14 +249,22 @@ describe("search", () => {
 describe("cheapest", () => {
   test("ranks by blended cost, never returns models without cost", async () => {
     const t = await syncedCatalog();
-    const { models: rows } = await t.query(api.models.listCheapest, {
-      limit: 20,
-      excludeDeprecated: false,
-    });
-    expect(rows.every((m) => m.hasCost)).toBe(true);
-    const costs = rows.map((m) => m.costBlended);
-    expect(costs).toEqual([...costs].toSorted((a, b) => (a ?? 0) - (b ?? 0)));
-    expect(rows).toHaveLength(FIXTURE_MODEL_COUNT - 2);
+    const cheapest = async (modelsDevProviderIds: string[]) =>
+      (
+        await t.query(api.models.listCheapest, {
+          modelsDevProviderIds,
+          limit: 20,
+          excludeDeprecated: false,
+        })
+      ).models;
+    const first = await cheapest(["openai", "google", "anthropic"]);
+    const rest = await cheapest(["azure", "deepseek", "deepinfra", "nvidia", "novita-ai"]);
+    for (const rows of [first, rest]) {
+      expect(rows.every((m) => m.hasCost)).toBe(true);
+      const costs = rows.map((m) => m.costBlended);
+      expect(costs).toEqual([...costs].toSorted((a, b) => (a ?? 0) - (b ?? 0)));
+    }
+    expect(first.length + rest.length).toBe(FIXTURE_MODEL_COUNT - 3);
   });
 
   test("applies capability filters and the free/deprecated switches", async () => {
@@ -251,8 +272,12 @@ describe("cheapest", () => {
     const { models: defaults } = await t.query(api.models.listCheapest, { toolCall: true });
     expect(defaults.map((m) => m.status)).not.toContain("deprecated");
     expect(defaults.every((m) => m.toolCall)).toBe(true);
-    const { models: free } = await t.query(api.models.listCheapest, { limit: 1 });
-    expect(free[0]).toMatchObject({ modelsDevModelId: "lyria-3-pro-preview", costBlended: 0 });
+    const { models: free } = await t.query(api.models.listCheapest, { limit: 2 });
+    expect(free.every((m) => m.costBlended === 0)).toBe(true);
+    expect(ids(free).toSorted()).toEqual([
+      "google/lyria-3-pro-preview",
+      "nvidia/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+    ]);
     const { models: paid } = await t.query(api.models.listCheapest, {
       excludeFree: true,
       limit: 1,
@@ -263,7 +288,7 @@ describe("cheapest", () => {
       excludeFree: true,
       limit: 3,
     });
-    expect(ctx.every((m) => m.context >= 1_000_000)).toBe(true);
+    expect(ctx.every((m) => m.limit.context >= 1_000_000)).toBe(true);
     const { models: audio } = await t.query(api.models.listCheapest, {
       inputModalities: ["audio"],
       limit: 20,
@@ -272,6 +297,7 @@ describe("cheapest", () => {
       "google/gemini-2.5-flash",
       "google/gemini-2.5-pro",
       "google/gemini-3.5-flash",
+      "nvidia/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
     ]);
     const { models: scoped } = await t.query(api.models.listCheapest, {
       modelsDevProviderIds: ["anthropic"],
@@ -301,7 +327,7 @@ describe("cheapest", () => {
 
 describe("cheapest over large ties", () => {
   test("walks past more than 500 tied rows to reach later matches", async () => {
-    const t = componentTest();
+    const t = setupTest();
     await relaxGuards(t);
     catalogServer({
       body: fixtureJson((c) => {
@@ -324,7 +350,7 @@ describe("cheapest over large ties", () => {
       excludeDeprecated: false,
     });
     expect(rows).toHaveLength(20);
-    expect(rows.every((m) => m.context === 2_000_000)).toBe(true);
+    expect(rows.every((m) => m.limit.context === 2_000_000)).toBe(true);
   });
 });
 
@@ -351,7 +377,7 @@ describe("list keeps the requested order under filters", () => {
       includeDeprecated: true,
       paginationOpts: page,
     });
-    const ctxs = res.page.map((m) => m.context);
+    const ctxs = res.page.map((m) => m.limit.context);
     expect(ctxs).toEqual(ctxs.toSorted((a, b) => b - a));
     expect(res.page.every((m) => m.modelsDevProviderId === "azure")).toBe(true);
   });
@@ -376,7 +402,7 @@ describe("list keeps the requested order under filters", () => {
       paginationOpts: page,
     });
     expect(res.page.length).toBeGreaterThan(1);
-    expect(res.page.every((m) => m.context >= 1_000_000)).toBe(true);
+    expect(res.page.every((m) => m.limit.context >= 1_000_000)).toBe(true);
     const dates = res.page.map((m) => m.releaseDate);
     expect(dates).toEqual(dates.toSorted().toReversed());
   });
@@ -389,7 +415,7 @@ describe("list keeps the requested order under filters", () => {
       modelsDevProviderId: "openai",
       paginationOpts: page,
     });
-    const ctxs = res.page.map((m) => m.context);
+    const ctxs = res.page.map((m) => m.limit.context);
     expect(res.page.length).toBeGreaterThan(0);
     expect(ctxs.every((c) => c >= 1_000_000)).toBe(true);
     expect(ctxs).toEqual(ctxs.toSorted((a, b) => b - a));
@@ -533,29 +559,22 @@ describe("list pagination bounds", () => {
     expect(ids(following.page)).toEqual(ids(next.page));
   });
 
-  test("maximumRowsRead is clamped, and batches never read past the allowance", async () => {
+  test("caller read budgets are ignored", async () => {
     const t = await syncedCatalog();
-    const none = {
-      reasoning: true,
-      toolCall: false,
-      openWeights: true,
-      modelsDevProviderId: "azure",
-    };
-    const small = await t.query(api.models.list, {
-      ...none,
-      paginationOpts: { numItems: 10, cursor: null, maximumRowsRead: 2 },
+    const unbudgeted = await t.query(api.models.list, {
+      includeDeprecated: true,
+      paginationOpts: { numItems: 10, cursor: null },
     });
-    expect(small.page).toEqual([]);
-    expect(small.isDone).toBe(false);
-    const rest = await t.query(api.models.list, {
-      ...none,
-      paginationOpts: { numItems: 10, cursor: small.continueCursor, maximumRowsRead: 1_000_000 },
+    const budgeted = await t.query(api.models.list, {
+      includeDeprecated: true,
+      paginationOpts: { numItems: 10, cursor: null, maximumRowsRead: 2, maximumBytesRead: 1 },
     });
-    expect(rest.isDone).toBe(true);
+    expect(budgeted.page).toHaveLength(10);
+    expect(budgeted).toEqual(unbudgeted);
   });
 
   test("maximumRowsRead cannot exceed numItems plus one", async () => {
-    const t = componentTest();
+    const t = setupTest();
     const base = fixtureModel("openai", "gpt-5.4");
     await t.run(async (ctx) => {
       for (let i = 0; i < 102; i++) {
@@ -585,15 +604,14 @@ describe("list pagination bounds", () => {
   }, 60_000);
 });
 
-const sync = (t: ReturnType<typeof componentTest>, force = true) =>
-  t.action(force ? api.sync.runForced : api.sync.run, {});
+const sync = (t: TestCtx, force = true) => t.action(force ? api.sync.runForced : api.sync.run, {});
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
 test("disabled ticks and changed retention preserve history", async () => {
-  const t = componentTest();
+  const t = setupTest();
   await relaxGuards(t);
   catalogServer({ body: fixtureJson() });
   const changedAt = Date.now() - 40 * 86400000;
@@ -618,7 +636,7 @@ test("disabled ticks and changed retention preserve history", async () => {
 });
 
 test("equivalents selects the cheapest provider before applying the limit", async () => {
-  const t = componentTest();
+  const t = setupTest();
   await t.run(async (ctx) => {
     for (const [modelsDevProviderId, price] of [
       ["expensive", 10],
@@ -641,19 +659,20 @@ test("equivalents selects the cheapest provider before applying the limit", asyn
 });
 
 test("equivalents sorts the largest finite price before unpriced models", async () => {
-  const t = componentTest();
+  const t = setupTest();
   const raw = rawModel(fixtureCatalog, "openai", "gpt-5-mini");
   await t.run(async (ctx) => {
     for (const [modelsDevProviderId, cost] of [
       ["unpriced", undefined],
       ["priced", { input: Number.MAX_VALUE, output: Number.MAX_VALUE }],
     ] as const) {
-      const row = requireValue(
+      const row = required(
         normalizeModel(modelsDevProviderId, "m", {
           ...raw,
           cost,
           canonical_model_id: "extreme",
         }),
+        "normalized model",
       );
       await ctx.db.insert("models", { ...row, contentHash: "h", firstSeenAt: 0, updatedAt: 0 });
     }
@@ -666,71 +685,69 @@ test("equivalents sorts the largest finite price before unpriced models", async 
 });
 
 test("unknown modality filters are rejected", async () => {
-  const t = componentTest();
-  await expect(
+  const t = setupTest();
+  await expectModelsDevError(
     t.query(api.models.listCheapest, { inputModalities: ["typo"] }),
-  ).rejects.toMatchObject({
-    data: { code: "MODELS_DEV_INVALID_ARGUMENT" },
-  });
-  await expect(
+    "MODELS_DEV_INVALID_ARGUMENT",
+  );
+  await expectModelsDevError(
     t.query(api.models.list, {
       outputModalities: ["typo"],
       paginationOpts: { numItems: 5, cursor: null },
     }),
-  ).rejects.toMatchObject({ data: { code: "MODELS_DEV_INVALID_ARGUMENT" } });
+    "MODELS_DEV_INVALID_ARGUMENT",
+  );
 });
 
-test.each(["not-json", "{}", "null", "[{}]"])(
-  "malformed cursor %s has a package error",
-  async (cursor) => {
-    const t = componentTest();
-    for (const paginationOpts of [
-      { numItems: 5, cursor },
-      { numItems: 5, cursor: null, endCursor: cursor },
-    ])
-      await expect(t.query(api.models.list, { paginationOpts })).rejects.toMatchObject({
-        data: { code: "MODELS_DEV_INVALID_ARGUMENT" },
-      });
-  },
-);
+test.each([
+  "not-json",
+  "{}",
+  "null",
+  "[{}]",
+  JSON.stringify(Array(17).fill(1)),
+  `["${"a".repeat(4094)}"]`,
+])("malformed cursor %s has a package error", async (cursor) => {
+  const t = setupTest();
+  for (const paginationOpts of [
+    { numItems: 5, cursor },
+    { numItems: 5, cursor: null, endCursor: cursor },
+  ])
+    await expectModelsDevError(
+      t.query(api.models.list, { paginationOpts }),
+      "MODELS_DEV_INVALID_ARGUMENT",
+    );
+});
 
 test("numeric query bounds reject NaN and infinity", async () => {
-  const t = componentTest();
-  const invalid = { data: { code: "MODELS_DEV_INVALID_ARGUMENT" } };
-  await expect(t.query(api.models.listCheapest, { limit: NaN })).rejects.toMatchObject(invalid);
-  await expect(t.query(api.models.search, { query: "x", limit: NaN })).rejects.toMatchObject(
-    invalid,
+  const t = setupTest();
+  await expectModelsDevError(
+    t.query(api.models.listCheapest, { limit: NaN }),
+    "MODELS_DEV_INVALID_ARGUMENT",
   );
-  await expect(
+  await expectModelsDevError(
+    t.query(api.models.search, { query: "x", limit: NaN }),
+    "MODELS_DEV_INVALID_ARGUMENT",
+  );
+  await expectModelsDevError(
     t.query(api.models.listEquivalents, { modelsDevCanonicalModelId: "x", limit: NaN }),
-  ).rejects.toMatchObject(invalid);
-  await expect(
+    "MODELS_DEV_INVALID_ARGUMENT",
+  );
+  await expectModelsDevError(
     t.query(api.models.listPriceChanges, {
       modelsDevProviderId: "p",
       modelsDevModelId: "m",
       limit: NaN,
     }),
-  ).rejects.toMatchObject(invalid);
-  await expect(
+    "MODELS_DEV_INVALID_ARGUMENT",
+  );
+  await expectModelsDevError(
     t.query(api.models.list, { paginationOpts: { numItems: NaN, cursor: null } }),
-  ).rejects.toMatchObject(invalid);
-});
-
-test("list honors byte budgets", async () => {
-  const t = componentTest();
-  await relaxGuards(t);
-  catalogServer({ body: fixtureJson() });
-  await sync(t);
-  const first = await t.query(api.models.list, {
-    paginationOpts: { cursor: null, numItems: 100, maximumBytesRead: 1 },
-  });
-  expect(first.page.length).toBeLessThan(3);
-  expect(first.pageStatus).toBe("SplitRequired");
-  expect(first.splitCursor).toBeTypeOf("string");
+    "MODELS_DEV_INVALID_ARGUMENT",
+  );
 });
 
 test("list preserves pinned split metadata", async () => {
-  const t = componentTest();
+  const t = setupTest();
   await relaxGuards(t);
   catalogServer({ body: fixtureJson() });
   await sync(t);
@@ -743,8 +760,7 @@ test("list preserves pinned split metadata", async () => {
 });
 
 test("invalid usage throws before model resolution", async () => {
-  const t = componentTest();
-  const invalid = { data: { code: "MODELS_DEV_INVALID_ARGUMENT" } };
+  const t = setupTest();
   for (const count of [NaN, -1, Infinity, -Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
     expect(() =>
       estimateCost(
@@ -753,7 +769,7 @@ test("invalid usage throws before model resolution", async () => {
         { mode: null, inputTokenScope: "includesCache" },
       ),
     ).toThrow();
-    await expect(
+    await expectModelsDevError(
       t.query(api.models.estimateCost, {
         mode: null,
         inputTokenScope: "includesCache",
@@ -761,7 +777,8 @@ test("invalid usage throws before model resolution", async () => {
         model: "missing",
         usage: { outputTokens: count },
       }),
-    ).rejects.toMatchObject(invalid);
+      "MODELS_DEV_INVALID_ARGUMENT",
+    );
   }
   expect(() =>
     estimateCost(
@@ -815,7 +832,7 @@ test("an unpriced requested mode is unknown", async () => {
       { inputTokenScope: "includesCache", mode: "absent" },
     ),
   ).toEqual({ known: false });
-  const t = componentTest();
+  const t = setupTest();
   await relaxGuards(t);
   catalogServer({ body: fixtureJson() });
   await sync(t);
@@ -831,7 +848,7 @@ test("an unpriced requested mode is unknown", async () => {
 });
 
 test("provider cheapest reads past unrelated rows and reports scan truncation", async () => {
-  const t = componentTest();
+  const t = setupTest();
   const base = fixtureModel("openai", "gpt-5.4");
   await t.run(async (ctx) => {
     for (let i = 0; i < 4001; i++)
@@ -876,7 +893,7 @@ test("provider cheapest reads past unrelated rows and reports scan truncation", 
 }, 60000);
 
 test("cheapest stops before requesting row 4001", async () => {
-  const t = componentTest();
+  const t = setupTest();
   const base = fixtureModel("openai", "gpt-5.4");
   await t.run(async (ctx) => {
     for (let i = 0; i < 4001; i++)
@@ -931,3 +948,52 @@ test("cheapest stops before requesting row 4001", async () => {
   });
   expect(reads).toBe(4000);
 }, 60000);
+
+test("the type filter selects one model type or models without a type", async () => {
+  const t = await syncedCatalog();
+  const listed = async (type: string | null | undefined) =>
+    ids((await t.query(api.models.list, { type, paginationOpts: page })).page);
+  expect(await listed("embedding")).toEqual(["novita-ai/qwen/qwen3-embedding-8b"]);
+  expect(await listed(null)).not.toContain("novita-ai/qwen/qwen3-embedding-8b");
+  expect(await listed(null)).toHaveLength((await listed(undefined)).length - 1);
+  const cheapest = async (type: string | null | undefined) =>
+    ids(
+      (
+        await t.query(api.models.listCheapest, {
+          type,
+          modelsDevProviderIds: ["novita-ai", "deepinfra"],
+          limit: 20,
+        })
+      ).models,
+    );
+  expect(await cheapest(undefined)).toEqual([
+    "novita-ai/qwen/qwen3-embedding-8b",
+    "deepinfra/Qwen/Qwen3-32B",
+  ]);
+  expect(await cheapest("embedding")).toEqual(["novita-ai/qwen/qwen3-embedding-8b"]);
+  expect(await cheapest(null)).toEqual(["deepinfra/Qwen/Qwen3-32B"]);
+  expect(await cheapest("reranking")).toEqual([]);
+});
+
+test("listCheapest deduplicates provider IDs and rejects more than 64", async () => {
+  const t = await syncedCatalog();
+  const { models } = await t.query(api.models.listCheapest, {
+    modelsDevProviderIds: [
+      ...Array.from({ length: 70 }, () => "anthropic"),
+      ...Array.from({ length: 63 }, (_, i) => `absent-${i}`),
+    ],
+    limit: 20,
+  });
+  expect(ids(models).toSorted()).toEqual([
+    "anthropic/claude-haiku-4-5",
+    "anthropic/claude-opus-4-5",
+    "anthropic/claude-opus-4-8",
+    "anthropic/claude-sonnet-4-5",
+  ]);
+  await expectModelsDevError(
+    t.query(api.models.listCheapest, {
+      modelsDevProviderIds: Array.from({ length: 65 }, (_, i) => `p-${i}`),
+    }),
+    "MODELS_DEV_INVALID_ARGUMENT",
+  );
+});

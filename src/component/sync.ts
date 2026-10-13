@@ -18,6 +18,7 @@ import { pricingOf } from "../shared/normalize.js";
 import {
   lastStatusValidator,
   modelInputValidator,
+  partialReasonValidator,
   providerInputValidator,
   syncCountsFields,
   syncStatusValidator,
@@ -46,7 +47,6 @@ export const getStatus = query({
       removed: 0,
       priceChanges: 0,
       skippedModels: 0,
-      removalSkipped: false,
       durationMs: 0,
     };
     if (!row) return { state: "never_synced", running: false, errors: [], ...base };
@@ -57,10 +57,11 @@ export const getStatus = query({
       running: row.running,
       ...(row.running &&
         row.leaseExpiresAt !== undefined && { leaseExpiresAt: row.leaseExpiresAt }),
-      source: row.source,
+      sourceUrl: row.sourceUrl,
       ...(row.lastCheckedAt > 0 && { lastCheckedAt: row.lastCheckedAt }),
       ...(row.lastSyncedAt !== undefined && { lastSyncedAt: row.lastSyncedAt }),
       ...(row.lastStatus !== undefined && { lastStatus: row.lastStatus }),
+      ...(row.partialReason !== undefined && { partialReason: row.partialReason }),
       errors: row.errors,
       providerCount: row.providerCount,
       modelCount: row.modelCount,
@@ -69,7 +70,6 @@ export const getStatus = query({
       removed: row.removed,
       priceChanges: row.priceChanges,
       skippedModels: row.skippedModels,
-      removalSkipped: row.removalSkipped,
       durationMs: row.durationMs,
     };
   },
@@ -109,7 +109,7 @@ const beginResult = v.union(
     isFirstSync: v.boolean(),
     state: v.optional(
       v.object({
-        source: v.string(),
+        sourceUrl: v.string(),
         etag: v.optional(v.string()),
         contentHash: v.optional(v.string()),
       }),
@@ -138,7 +138,7 @@ export const begin = internalMutation({
     if (row) await ctx.db.patch("syncState", row._id, lease);
     else {
       await ctx.db.insert("syncState", {
-        source: config.sourceUrl,
+        sourceUrl: config.sourceUrl,
         errors: [],
         lastCheckedAt: 0,
         providerCount: 0,
@@ -148,7 +148,6 @@ export const begin = internalMutation({
         removed: 0,
         priceChanges: 0,
         skippedModels: 0,
-        removalSkipped: false,
         durationMs: 0,
         ...lease,
       });
@@ -159,7 +158,7 @@ export const begin = internalMutation({
       isFirstSync: row?.lastSyncedAt === undefined,
       ...(row && {
         state: {
-          source: row.source,
+          sourceUrl: row.sourceUrl,
           ...(row.etag !== undefined && { etag: row.etag }),
           ...(row.contentHash !== undefined && { contentHash: row.contentHash }),
         },
@@ -170,10 +169,9 @@ export const begin = internalMutation({
 
 async function holdLease(ctx: MutationCtx, runId: string): Promise<boolean> {
   const row = await ctx.db.query("syncState").first();
-  const now = Date.now();
-  if (!row || row.runId !== runId || (row.leaseExpiresAt ?? 0) <= now) return false;
+  if (!row || row.runId !== runId) return false;
   await ctx.db.patch("syncState", row._id, {
-    leaseExpiresAt: now + LEASE_MS,
+    leaseExpiresAt: Date.now() + LEASE_MS,
     etag: undefined,
     contentHash: undefined,
   });
@@ -376,7 +374,8 @@ export const finish = internalMutation({
   args: {
     runId: v.string(),
     status: lastStatusValidator,
-    source: v.optional(v.string()),
+    partialReason: v.optional(partialReasonValidator),
+    sourceUrl: v.optional(v.string()),
     etag: v.optional(v.string()),
     contentHash: v.optional(v.string()),
     errors: v.optional(v.array(syncSourceErrorValidator)),
@@ -386,38 +385,35 @@ export const finish = internalMutation({
   returns: v.boolean(),
   handler: async (ctx, args) => {
     const row = await ctx.db.query("syncState").first();
+    if (!row || row.runId !== args.runId) return false;
     const now = Date.now();
-    if (!row || row.runId !== args.runId || (row.leaseExpiresAt ?? 0) <= now) return false;
     const common = {
       running: false,
       runId: undefined,
       leaseExpiresAt: undefined,
       lastCheckedAt: now,
       lastStatus: args.status,
+      partialReason: args.status === "partial" ? args.partialReason : undefined,
       durationMs: args.durationMs,
       errors: args.errors ?? [],
     };
     if (args.status === "error") {
-      await ctx.db.patch("syncState", row._id, {
-        ...common,
-      });
+      await ctx.db.patch("syncState", row._id, common);
       return true;
     }
     if (args.status === "partial") {
       await ctx.db.patch("syncState", row._id, {
         ...common,
-
-        removalSkipped: true,
+        ...args.stats,
         etag: undefined,
         contentHash: undefined,
-        ...(args.source !== undefined && { source: args.source }),
+        ...(args.sourceUrl !== undefined && { sourceUrl: args.sourceUrl }),
       });
       return true;
     }
     await ctx.db.patch("syncState", row._id, {
       ...common,
-
-      ...(args.source !== undefined && { source: args.source }),
+      ...(args.sourceUrl !== undefined && { sourceUrl: args.sourceUrl }),
       ...(args.status === "ok"
         ? { etag: args.etag, contentHash: args.contentHash }
         : {

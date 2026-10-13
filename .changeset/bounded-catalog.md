@@ -3,11 +3,11 @@
 ---
 
 - Breaking: catalog identifiers become `modelsDevProviderId`, `modelsDevProviderIds` and `modelsDevModelId`; Convex row identities remain `_id` on documents and use entity-specific names in sync operations.
-- Breaking: model limits become `context`, `input` and `output`; minimum query limits become `minContextTokens` and `minOutputTokens`; model provider metadata becomes `provider`.
+- Breaking: minimum query limits become `minContextTokens` and `minOutputTokens`.
 - Breaking: replace `sync.now` and its `force` flag with guarded `sync.run` and explicit `sync.runForced` operations.
 - Breaking: sync summaries retain only the ordered `errors` array; skipped invocations use `reason`.
 - Breaking: use `MODELS_DEV_INVALID_ARGUMENT` for invalid settings, `MODELS_DEV_INVALID_RESPONSE` for malformed catalogs, `MODELS_DEV_PROVIDER_ERROR` for HTTP failures and `MODELS_DEV_NETWORK_ERROR` for requests without a response.
-- Breaking: error guards require the fixed message for the code, validate optional provider diagnostics and permit `retryable` only for provider and network failures.
+- Breaking: error guards require the fixed message for the code, validate optional provider diagnostics, require `retryable` for provider and network failures and reject it for every other code.
 - Breaking: cost estimation requires an explicit `mode` (`null` for base pricing) and `inputTokenScope` (`includesCache` or `excludesCache`).
 - Breaking: rename `usageFromAgent` to `extractUsage`, `providerCandidates` to `listProviderCandidates`, `PriceFields` to `CostFields` and `PriceTier` to `CostTier`.
 - Breaking: model status is limited to catalog values `alpha`, `beta` and `deprecated`; export model, sync, skip-reason and history-event unions.
@@ -17,7 +17,7 @@
 - Breaking: list page sizes must be integers from 1 through 100; bounded pages expose continuation and pinned-interval split metadata.
 - Breaking: `models.listCheapest` returns `{ models, isComplete }` and merges provider cost indexes when providers are selected.
 - Breaking: costs with unsafe rounded nano-USD terms or totals return `known: false`; invalid token counts throw `MODELS_DEV_INVALID_ARGUMENT`.
-- Breaking: upgrade the `convex-helpers` peer to `^0.1.127` and require Node.js 24 or newer.
+- Breaking: upgrade the `convex-helpers` peer to `^0.1.128` and require Node.js 24 or newer.
 - Breaking: client methods discard undeclared fields; example maintenance functions are internal and public example queries require authentication.
 - Export `MODELS_DEV_ERROR_CODES` and document exported client methods and types in declarations.
 - Preserve stored rows for malformed catalog models and providers while enforcing download, Unicode, collection, indexed-string and row-size bounds.

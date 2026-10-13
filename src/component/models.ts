@@ -20,6 +20,12 @@ const modelDoc = schema.doc("models");
 const modalityList = v.array(v.string());
 const MODALITY_NAMES = new Set(["text", "audio", "image", "video", "pdf"]);
 const CHEAPEST_MAX_SCAN = 4000;
+const MAX_CHEAPEST_PROVIDER_IDS = 64;
+const modelTypeFilter = v.optional(v.union(v.string(), v.null()));
+
+function matchesType(m: Doc<"models">, type: string | null | undefined): boolean {
+  return type === undefined || (m.type ?? null) === type;
+}
 
 const MAX_KEY_PREFIXES = 8;
 
@@ -100,6 +106,7 @@ export const list = query({
   args: {
     modelsDevProviderId: v.optional(v.string()),
     family: v.optional(v.string()),
+    type: modelTypeFilter,
     status: v.optional(modelStatusValidator),
     reasoning: v.optional(v.boolean()),
     toolCall: v.optional(v.boolean()),
@@ -136,14 +143,14 @@ export const list = query({
       const floor = minContextTokens ?? 0;
       indexed = (
         modelsDevProviderId !== undefined
-          ? table.withIndex("by_modelsDevProviderId_and_context", (q) =>
-              q.eq("modelsDevProviderId", modelsDevProviderId).gte("context", floor),
+          ? table.withIndex("by_modelsDevProviderId_and_contextTokens", (q) =>
+              q.eq("modelsDevProviderId", modelsDevProviderId).gte("contextTokens", floor),
             )
           : family !== undefined
-            ? table.withIndex("by_family_and_context", (q) =>
-                q.eq("family", family).gte("context", floor),
+            ? table.withIndex("by_family_and_contextTokens", (q) =>
+                q.eq("family", family).gte("contextTokens", floor),
               )
-            : table.withIndex("by_context", (q) => q.gte("context", floor))
+            : table.withIndex("by_contextTokens", (q) => q.gte("contextTokens", floor))
       ).order("desc");
     } else {
       indexed =
@@ -164,6 +171,7 @@ export const list = query({
       (args.modelsDevProviderId === undefined ||
         m.modelsDevProviderId === args.modelsDevProviderId) &&
       (args.family === undefined || m.family === args.family) &&
+      matchesType(m, args.type) &&
       (args.status !== undefined
         ? m.status === args.status
         : args.includeDeprecated || m.status !== "deprecated") &&
@@ -171,7 +179,7 @@ export const list = query({
       (args.toolCall === undefined || m.toolCall === args.toolCall) &&
       (args.structuredOutput === undefined || m.structuredOutput === args.structuredOutput) &&
       (args.openWeights === undefined || m.openWeights === args.openWeights) &&
-      (args.minContextTokens === undefined || m.context >= args.minContextTokens) &&
+      (args.minContextTokens === undefined || m.limit.context >= args.minContextTokens) &&
       (args.maxCostInput === undefined ||
         (m.hasCost && m.costInput !== undefined && m.costInput <= args.maxCostInput)) &&
       inputBits.every((bit) => (m.inputMask & bit) === bit) &&
@@ -214,6 +222,7 @@ export const listCheapest = query({
     toolCall: v.optional(v.boolean()),
     structuredOutput: v.optional(v.boolean()),
     inputModalities: v.optional(modalityList),
+    type: modelTypeFilter,
     modelsDevProviderIds: v.optional(v.array(v.string())),
     excludeFree: v.optional(v.boolean()),
     excludeDeprecated: v.optional(v.boolean()),
@@ -227,9 +236,12 @@ export const listCheapest = query({
     const excludeDeprecated = args.excludeDeprecated ?? true;
     const required = masks(args.inputModalities).reduce((acc, bit) => acc | bit, 0);
     const providers = args.modelsDevProviderIds ? new Set(args.modelsDevProviderIds) : undefined;
+    if (providers && providers.size > MAX_CHEAPEST_PROVIDER_IDS)
+      throw modelsDevError("MODELS_DEV_INVALID_ARGUMENT");
     const matches = (m: Doc<"models">) =>
-      (args.minContextTokens === undefined || m.context >= args.minContextTokens) &&
-      (args.minOutputTokens === undefined || m.output >= args.minOutputTokens) &&
+      (args.minContextTokens === undefined || m.limit.context >= args.minContextTokens) &&
+      (args.minOutputTokens === undefined || m.limit.output >= args.minOutputTokens) &&
+      matchesType(m, args.type) &&
       (args.reasoning === undefined || m.reasoning === args.reasoning) &&
       (args.toolCall === undefined || m.toolCall === args.toolCall) &&
       (args.structuredOutput === undefined || m.structuredOutput === args.structuredOutput) &&

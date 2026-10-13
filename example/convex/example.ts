@@ -18,18 +18,20 @@ const modelSummary = v.object({
   modelsDevProviderId: v.string(),
   modelsDevModelId: v.string(),
   name: v.string(),
-  context: v.number(),
+  contextTokens: v.number(),
   costInput: v.optional(v.number()),
   costOutput: v.optional(v.number()),
 });
 type ModelSummary = Infer<typeof modelSummary>;
 
-function summarize(m: ModelSummary): ModelSummary {
+function summarize(
+  m: Omit<ModelSummary, "contextTokens"> & { limit: { context: number } },
+): ModelSummary {
   return {
     modelsDevProviderId: m.modelsDevProviderId,
     modelsDevModelId: m.modelsDevModelId,
     name: m.name,
-    context: m.context,
+    contextTokens: m.limit.context,
     ...(m.costInput !== undefined && { costInput: m.costInput }),
     ...(m.costOutput !== undefined && { costOutput: m.costOutput }),
   };

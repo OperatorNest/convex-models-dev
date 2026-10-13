@@ -12,7 +12,7 @@ Read [README.md](README.md), [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](S
 - App wrappers authorize callers. Example maintenance functions are internal; public example queries require authentication.
 - Treat catalog data as untrusted. Preserve download, normalization, storage-size, catalog-loss and lease guards.
 - Catalog mutations clear cache validators before writing; only completed data syncs restore them.
-- Throw `modelsDevError(code, details?)` with its fixed message. Add a code, message and README error row together.
+- Throw `modelsDevError(code, details?)` with its fixed message; provider and network codes require `retryable`. Add a code, message and README error row together.
 
 ## Query and validator patterns
 
@@ -43,7 +43,7 @@ Start with affected tests and formatting, then run the required checks:
 | Prose Markdown                      | `pnpm fmt:check`                                                                |
 | Executable docs                     | Formatting, affected example/client tests and smoke for runtime claims          |
 
-Tests stub fetch and call `relaxGuards` for small fixtures. Component tests use `componentTest`; shared helpers belong in `src/test-helpers.ts`. Use `vi.setSystemTime` for clock-dependent assertions and restore timers after each test. Coverage floors are at least 90% statements and 85% branches; never weaken gates.
+Tests stub fetch and call `relaxGuards` for small fixtures. Component tests use `setupTest` and `required`, and assert errors with `expectModelsDevError`; shared helpers belong in `src/test-helpers.ts`. Use `vi.setSystemTime` for clock-dependent assertions and restore timers after each test. Coverage floors are at least 90% statements and 85% branches; never weaken gates.
 
 Smoke installs a tarball in a disposable consumer, compiles strict TypeScript, runs Vitest and calls an anonymous local backend with fixture catalog endpoints and isolated ports. It removes inherited deployment selectors and never calls live catalog providers. Local smoke proves neither cloud execution nor live-provider behavior.
 

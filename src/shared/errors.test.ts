@@ -4,7 +4,10 @@ import { isModelsDevError, modelsDevError, MODELS_DEV_ERROR_CODES } from "./erro
 
 test("each error code has one fixed message", () => {
   for (const code of MODELS_DEV_ERROR_CODES) {
-    const error = modelsDevError(code);
+    const error =
+      code === "MODELS_DEV_PROVIDER_ERROR" || code === "MODELS_DEV_NETWORK_ERROR"
+        ? modelsDevError(code, { retryable: false })
+        : modelsDevError(code);
     expect(isModelsDevError(error)).toBe(true);
     expect(error.data.message.endsWith(".")).toBe(true);
   }
@@ -18,6 +21,7 @@ test("error guards validate optional HTTP status and reject undeclared fields", 
   for (const providerStatus of [NaN, Infinity, 0, 600, 200.5, "503", null])
     expect(isModelsDevError(new ConvexError({ ...data, providerStatus }))).toBe(false);
   expect(isModelsDevError(new ConvexError({ ...data, message: "Caller text." }))).toBe(false);
+  expect(isModelsDevError(new ConvexError({ code: data.code, message: data.message }))).toBe(false);
   expect(
     isModelsDevError(
       new ConvexError({ ...modelsDevError("MODELS_DEV_INVALID_ARGUMENT").data, retryable: true }),

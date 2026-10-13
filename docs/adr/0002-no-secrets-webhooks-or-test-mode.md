@@ -1,4 +1,4 @@
-# 0002. Catalog-only runtime
+# 0002: Catalog-only runtime
 
 The component mirrors unauthenticated catalog endpoints, declares no environment variables and exposes no HTTP routes. Authentication and authorization belong to app wrappers. Settings live in component tables; provider aliases belong to the client.
 

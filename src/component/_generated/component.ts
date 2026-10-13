@@ -117,7 +117,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           _id: string;
           attachment: boolean;
           contentHash: string;
-          context: number;
+          contextTokens: number;
           costBlended?: number;
           costCacheRead?: number;
           costCacheWrite?: number;
@@ -131,11 +131,11 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           family?: string;
           firstSeenAt: number;
           hasCost: boolean;
-          input?: number;
           inputMask: number;
           interleaved?: true | { field: string };
           knowledge?: string;
           lastUpdated: string;
+          limit: { context: number; input?: number; output: number };
           modelsDevCanonicalModelId?: string;
           modelsDevModelId: string;
           modelsDevProviderId: string;
@@ -165,9 +165,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           >;
           name: string;
           openWeights: boolean;
-          output: number;
           outputMask: number;
-          provider?: { api?: string; npm?: string; shape?: string };
+          providerOverride?: { api?: string; npm?: string; shape?: string };
           reasoning: boolean;
           reasoningOptions?: Array<
             | { type: "toggle" }
@@ -190,6 +189,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             size: number;
           }>;
           toolCall: boolean;
+          type?: string;
           updatedAt: number;
         } | null,
         Name
@@ -203,7 +203,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           _id: string;
           attachment: boolean;
           contentHash: string;
-          context: number;
+          contextTokens: number;
           costBlended?: number;
           costCacheRead?: number;
           costCacheWrite?: number;
@@ -217,11 +217,11 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           family?: string;
           firstSeenAt: number;
           hasCost: boolean;
-          input?: number;
           inputMask: number;
           interleaved?: true | { field: string };
           knowledge?: string;
           lastUpdated: string;
+          limit: { context: number; input?: number; output: number };
           modelsDevCanonicalModelId?: string;
           modelsDevModelId: string;
           modelsDevProviderId: string;
@@ -251,9 +251,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           >;
           name: string;
           openWeights: boolean;
-          output: number;
           outputMask: number;
-          provider?: { api?: string; npm?: string; shape?: string };
+          providerOverride?: { api?: string; npm?: string; shape?: string };
           reasoning: boolean;
           reasoningOptions?: Array<
             | { type: "toggle" }
@@ -276,6 +275,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             size: number;
           }>;
           toolCall: boolean;
+          type?: string;
           updatedAt: number;
         } | null,
         Name
@@ -305,6 +305,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           status?: "alpha" | "beta" | "deprecated";
           structuredOutput?: boolean;
           toolCall?: boolean;
+          type?: string | null;
         },
         {
           continueCursor: string;
@@ -314,7 +315,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             _id: string;
             attachment: boolean;
             contentHash: string;
-            context: number;
+            contextTokens: number;
             costBlended?: number;
             costCacheRead?: number;
             costCacheWrite?: number;
@@ -328,11 +329,11 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             family?: string;
             firstSeenAt: number;
             hasCost: boolean;
-            input?: number;
             inputMask: number;
             interleaved?: true | { field: string };
             knowledge?: string;
             lastUpdated: string;
+            limit: { context: number; input?: number; output: number };
             modelsDevCanonicalModelId?: string;
             modelsDevModelId: string;
             modelsDevProviderId: string;
@@ -362,9 +363,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             >;
             name: string;
             openWeights: boolean;
-            output: number;
             outputMask: number;
-            provider?: { api?: string; npm?: string; shape?: string };
+            providerOverride?: { api?: string; npm?: string; shape?: string };
             reasoning: boolean;
             reasoningOptions?: Array<
               | { type: "toggle" }
@@ -387,6 +387,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
               size: number;
             }>;
             toolCall: boolean;
+            type?: string;
             updatedAt: number;
           }>;
           pageStatus?: "SplitRecommended" | "SplitRequired" | null;
@@ -409,6 +410,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           reasoning?: boolean;
           structuredOutput?: boolean;
           toolCall?: boolean;
+          type?: string | null;
         },
         {
           isComplete: boolean;
@@ -417,7 +419,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             _id: string;
             attachment: boolean;
             contentHash: string;
-            context: number;
+            contextTokens: number;
             costBlended?: number;
             costCacheRead?: number;
             costCacheWrite?: number;
@@ -431,11 +433,11 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             family?: string;
             firstSeenAt: number;
             hasCost: boolean;
-            input?: number;
             inputMask: number;
             interleaved?: true | { field: string };
             knowledge?: string;
             lastUpdated: string;
+            limit: { context: number; input?: number; output: number };
             modelsDevCanonicalModelId?: string;
             modelsDevModelId: string;
             modelsDevProviderId: string;
@@ -465,9 +467,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             >;
             name: string;
             openWeights: boolean;
-            output: number;
             outputMask: number;
-            provider?: { api?: string; npm?: string; shape?: string };
+            providerOverride?: { api?: string; npm?: string; shape?: string };
             reasoning: boolean;
             reasoningOptions?: Array<
               | { type: "toggle" }
@@ -490,6 +491,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
               size: number;
             }>;
             toolCall: boolean;
+            type?: string;
             updatedAt: number;
           }>;
         },
@@ -504,7 +506,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           _id: string;
           attachment: boolean;
           contentHash: string;
-          context: number;
+          contextTokens: number;
           costBlended?: number;
           costCacheRead?: number;
           costCacheWrite?: number;
@@ -518,11 +520,11 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           family?: string;
           firstSeenAt: number;
           hasCost: boolean;
-          input?: number;
           inputMask: number;
           interleaved?: true | { field: string };
           knowledge?: string;
           lastUpdated: string;
+          limit: { context: number; input?: number; output: number };
           modelsDevCanonicalModelId?: string;
           modelsDevModelId: string;
           modelsDevProviderId: string;
@@ -552,9 +554,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           >;
           name: string;
           openWeights: boolean;
-          output: number;
           outputMask: number;
-          provider?: { api?: string; npm?: string; shape?: string };
+          providerOverride?: { api?: string; npm?: string; shape?: string };
           reasoning: boolean;
           reasoningOptions?: Array<
             | { type: "toggle" }
@@ -577,6 +578,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             size: number;
           }>;
           toolCall: boolean;
+          type?: string;
           updatedAt: number;
         }>,
         Name
@@ -694,7 +696,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           _id: string;
           attachment: boolean;
           contentHash: string;
-          context: number;
+          contextTokens: number;
           costBlended?: number;
           costCacheRead?: number;
           costCacheWrite?: number;
@@ -708,11 +710,11 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           family?: string;
           firstSeenAt: number;
           hasCost: boolean;
-          input?: number;
           inputMask: number;
           interleaved?: true | { field: string };
           knowledge?: string;
           lastUpdated: string;
+          limit: { context: number; input?: number; output: number };
           modelsDevCanonicalModelId?: string;
           modelsDevModelId: string;
           modelsDevProviderId: string;
@@ -742,9 +744,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           >;
           name: string;
           openWeights: boolean;
-          output: number;
           outputMask: number;
-          provider?: { api?: string; npm?: string; shape?: string };
+          providerOverride?: { api?: string; npm?: string; shape?: string };
           reasoning: boolean;
           reasoningOptions?: Array<
             | { type: "toggle" }
@@ -767,6 +768,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             size: number;
           }>;
           toolCall: boolean;
+          type?: string;
           updatedAt: number;
         } | null,
         Name
@@ -785,7 +787,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           _id: string;
           attachment: boolean;
           contentHash: string;
-          context: number;
+          contextTokens: number;
           costBlended?: number;
           costCacheRead?: number;
           costCacheWrite?: number;
@@ -799,11 +801,11 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           family?: string;
           firstSeenAt: number;
           hasCost: boolean;
-          input?: number;
           inputMask: number;
           interleaved?: true | { field: string };
           knowledge?: string;
           lastUpdated: string;
+          limit: { context: number; input?: number; output: number };
           modelsDevCanonicalModelId?: string;
           modelsDevModelId: string;
           modelsDevProviderId: string;
@@ -833,9 +835,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           >;
           name: string;
           openWeights: boolean;
-          output: number;
           outputMask: number;
-          provider?: { api?: string; npm?: string; shape?: string };
+          providerOverride?: { api?: string; npm?: string; shape?: string };
           reasoning: boolean;
           reasoningOptions?: Array<
             | { type: "toggle" }
@@ -858,6 +859,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             size: number;
           }>;
           toolCall: boolean;
+          type?: string;
           updatedAt: number;
         }>,
         Name
@@ -932,13 +934,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           lastSyncedAt?: number;
           leaseExpiresAt?: number;
           modelCount: number;
+          partialReason?: "price_loss" | "removal";
           priceChanges: number;
           providerCount: number;
-          removalSkipped: boolean;
           removed: number;
           running: boolean;
           skippedModels: number;
-          source?: string;
+          sourceUrl?: string;
           state: "never_synced" | "ok" | "error";
           updated: number;
         },
@@ -968,13 +970,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             source: "primary" | "fallback";
           }>;
           modelCount?: number;
+          partialReason?: "price_loss" | "removal";
           priceChanges?: number;
           providerCount?: number;
           reason?: "disabled" | "min_interval" | "already_running";
-          removalSkipped?: boolean;
           removed?: number;
           skippedModels?: number;
-          source?: string;
+          sourceUrl?: string;
           status: "ok" | "not_modified" | "partial" | "error" | "skipped";
           updated?: number;
         },
@@ -1004,13 +1006,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             source: "primary" | "fallback";
           }>;
           modelCount?: number;
+          partialReason?: "price_loss" | "removal";
           priceChanges?: number;
           providerCount?: number;
           reason?: "disabled" | "min_interval" | "already_running";
-          removalSkipped?: boolean;
           removed?: number;
           skippedModels?: number;
-          source?: string;
+          sourceUrl?: string;
           status: "ok" | "not_modified" | "partial" | "error" | "skipped";
           updated?: number;
         },

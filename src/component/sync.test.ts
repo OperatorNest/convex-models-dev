@@ -2,11 +2,13 @@ import { afterEach, expect, test, vi, beforeEach, describe } from "vitest";
 import { api, internal } from "./_generated/api.js";
 import {
   catalogServer,
-  componentTest,
+  drain,
+  expectModelsDevError,
+  setupTest,
   relaxGuards,
-  requireValue,
+  required,
   stubFetch,
-  type ComponentTest,
+  type TestCtx,
 } from "../test-helpers.js";
 import {
   fixtureJson,
@@ -24,8 +26,8 @@ import { normalizeModel, normalizeProvider } from "../shared/normalize.js";
 import { type FunctionArgs } from "convex/server";
 import { USER_AGENT } from "./syncCore.js";
 
-type T = ComponentTest;
-const setup = componentTest;
+type T = TestCtx;
+const setup = setupTest;
 
 function fixtureModelInput() {
   const row = fixtureModel("openai", "gpt-5.4");
@@ -68,7 +70,7 @@ describe("first sync, 200 then 304", () => {
     const result = await sync(t);
     expect(result).toMatchObject({
       status: "ok",
-      source: "https://models.dev/api.json",
+      sourceUrl: "https://models.dev/api.json",
       providerCount: FIXTURE_PROVIDER_COUNT,
       modelCount: FIXTURE_MODEL_COUNT,
       added: FIXTURE_MODEL_COUNT,
@@ -78,8 +80,8 @@ describe("first sync, 200 then 304", () => {
       skippedModels: 0,
     });
     expect(server.calls).toHaveLength(1);
-    expect(server.calls[0]?.headers["user-agent"]).toBe(USER_AGENT);
-    expect(server.calls[0]?.headers["if-none-match"]).toBeUndefined();
+    expect(new Headers(server.calls[0]?.init.headers).get("user-agent")).toBe(USER_AGENT);
+    expect(new Headers(server.calls[0]?.init.headers).get("if-none-match")).toBeNull();
 
     expect(await models(t)).toHaveLength(FIXTURE_MODEL_COUNT);
     expect(await t.query(api.providers.list, {})).toHaveLength(FIXTURE_PROVIDER_COUNT);
@@ -116,7 +118,7 @@ describe("first sync, 200 then 304", () => {
     const before = await models(t);
     const second = await sync(t);
     expect(second).toMatchObject({ status: "not_modified" });
-    expect(server.calls[1]?.headers["if-none-match"]).toBe('"etag-1"');
+    expect(new Headers(server.calls[1]?.init.headers).get("if-none-match")).toBe('"etag-1"');
     expect(await models(t)).toEqual(before);
     expect(await state(t)).toMatchObject({ lastStatus: "not_modified" });
     expect((await state(t))?.errors).toEqual([]);
@@ -285,7 +287,8 @@ describe("removal guard", () => {
     });
     server.etag = '"etag-2"';
     const forced = await sync(t, true);
-    expect(forced).toMatchObject({ removed: 1, removalSkipped: false });
+    expect(forced).toMatchObject({ removed: 1 });
+    expect(forced).not.toHaveProperty("partialReason");
     expect(await models(t)).toHaveLength(FIXTURE_MODEL_COUNT - 1);
     const history = await t.query(api.models.listPriceChanges, {
       modelsDevProviderId: "openai",
@@ -308,36 +311,45 @@ describe("removal guard", () => {
 
     await t.run(async (ctx) => {
       const row = await ctx.db.query("syncState").first();
-      await ctx.db.patch("syncState", requireValue(row)._id, { lastCheckedAt: 1 });
+      await ctx.db.patch("syncState", required(row, "sync state")._id, { lastCheckedAt: 1 });
     });
     const result = await sync(t, false);
-    expect(result).toMatchObject({ status: "partial", removed: 0, removalSkipped: true });
+    const loadedModelCount = FIXTURE_MODEL_COUNT - 8;
+    expect(result).toMatchObject({
+      status: "partial",
+      partialReason: "removal",
+      removed: 0,
+      modelCount: loadedModelCount,
+    });
     expect(await models(t)).toHaveLength(FIXTURE_MODEL_COUNT);
     expect(await t.query(api.providers.list, {})).toHaveLength(FIXTURE_PROVIDER_COUNT);
 
     expect(await state(t)).toMatchObject({
-      removalSkipped: true,
+      partialReason: "removal",
       lastStatus: "partial",
       lastSyncedAt: NOW,
-      modelCount: FIXTURE_MODEL_COUNT,
+      modelCount: loadedModelCount,
+      providerCount: FIXTURE_PROVIDER_COUNT - 2,
     });
     expect(await state(t)).not.toHaveProperty("etag");
     expect(await t.query(api.sync.getStatus, {})).toMatchObject({
       state: "ok",
       lastStatus: "partial",
-      removalSkipped: true,
+      partialReason: "removal",
       lastSyncedAt: NOW,
-      modelCount: FIXTURE_MODEL_COUNT,
+      modelCount: loadedModelCount,
       running: false,
     });
 
     const forced = await sync(t, true);
-    expect(forced).toMatchObject({ status: "ok", removalSkipped: false });
+    expect(forced).toMatchObject({ status: "ok" });
+    expect(forced).not.toHaveProperty("partialReason");
+    expect(await state(t)).not.toHaveProperty("partialReason");
     expect(forced.removed).toBeGreaterThan(0);
     expect((await models(t)).some((m) => m.modelsDevProviderId === "azure")).toBe(false);
     expect(
       (await t.query(api.providers.list, {})).map((p) => p.modelsDevProviderId).toSorted(),
-    ).toEqual(["anthropic", "google", "openai"]);
+    ).toEqual(["anthropic", "deepinfra", "google", "novita-ai", "nvidia", "openai"]);
   });
 
   test("a model that fails validation is skipped but its stored row is kept", async () => {
@@ -382,7 +394,7 @@ describe("count guard", () => {
 
   test("aborts on too few models even with enough providers", async () => {
     const t = setup();
-    await t.mutation(api.config.update, { minProviders: 1, minModels: 22 });
+    await t.mutation(api.config.update, { minProviders: 1, minModels: FIXTURE_MODEL_COUNT + 1 });
     catalogServer({ body: fixtureJson() });
     expect((await sync(t)).status).toBe("error");
     expect(await models(t)).toHaveLength(0);
@@ -440,12 +452,15 @@ describe("source fallback", () => {
     const server = catalogServer({ body: fixtureJson() });
     server.failPrimary = true;
     const result = await sync(t);
-    expect(result).toMatchObject({ status: "ok", source: "https://models.opencode.ai/api.json" });
+    expect(result).toMatchObject({
+      status: "ok",
+      sourceUrl: "https://models.opencode.ai/api.json",
+    });
     expect(server.calls.map((c) => new URL(c.url).host)).toEqual([
       "models.dev",
       "models.opencode.ai",
     ]);
-    expect((await state(t))?.source).toBe("https://models.opencode.ai/api.json");
+    expect((await state(t))?.sourceUrl).toBe("https://models.opencode.ai/api.json");
   });
 
   test("reports an error when every source fails and keeps old data", async () => {
@@ -472,7 +487,7 @@ describe("source fallback", () => {
     server.etag = '"etag-2"';
     await sync(t);
     expect(server.calls[1]?.url).toBe("https://mirror.example.com/api.json");
-    expect(server.calls[1]?.headers["if-none-match"]).toBeUndefined();
+    expect(new Headers(server.calls[1]?.init.headers).get("if-none-match")).toBeNull();
   });
 
   test("a network exception is classified as an error, not thrown", async () => {
@@ -546,7 +561,7 @@ describe("lease", () => {
     await relaxGuards(t);
     const server = catalogServer({ body: fixtureJson() });
     await sync(t);
-    const original = requireValue(vi.mocked(fetch).getMockImplementation());
+    const original = globalThis.fetch;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -575,7 +590,7 @@ describe("lease fencing", () => {
     const t = setup();
     await relaxGuards(t);
     const server = catalogServer({ body: fixtureJson() });
-    const original = vi.mocked(fetch).getMockImplementation();
+    const original = globalThis.fetch;
     let takenOver = false;
     vi.stubGlobal(
       "fetch",
@@ -585,7 +600,7 @@ describe("lease fencing", () => {
           vi.setSystemTime(NOW + LEASE_MS + 1);
           await t.mutation(internal.sync.begin, { runId: "thief", force: true, cron: false });
         }
-        return requireValue(original)(input, init);
+        return original(input, init);
       }),
     );
     const result = await sync(t);
@@ -596,7 +611,7 @@ describe("lease fencing", () => {
     expect(server.calls.length).toBeGreaterThan(0);
   });
 
-  test("write mutations reject a foreign or expired run id and renew a held lease", async () => {
+  test("write mutations reject a foreign run id and renew a held lease", async () => {
     const t = setup();
     await t.mutation(internal.sync.begin, { runId: "a", force: true, cron: false });
     const row = { ...fixtureModelInput() };
@@ -618,7 +633,45 @@ describe("lease fencing", () => {
       await t.mutation(internal.sync.upsertModels, { runId: "a", rows: [row], recordAdded: false }),
     ).toMatchObject({ leaseLost: false, added: 1 });
     expect((await state(t))?.leaseExpiresAt).toBe(NOW + 2 * LEASE_MS - 1000);
+  });
+
+  test("an expired lease that no run took over still accepts writes and the finish", async () => {
+    const t = setup();
+    await t.mutation(internal.sync.begin, { runId: "a", force: true, cron: false });
     vi.setSystemTime(NOW + 3 * LEASE_MS);
+    expect(
+      await t.mutation(internal.sync.upsertModels, {
+        runId: "a",
+        rows: [fixtureModelInput()],
+        recordAdded: false,
+      }),
+    ).toMatchObject({ leaseLost: false, added: 1 });
+    expect(
+      await t.mutation(internal.sync.finish, {
+        runId: "a",
+        status: "ok",
+        sourceUrl: "https://models.dev/api.json",
+        contentHash: "late",
+        durationMs: 1,
+        stats: {
+          added: 1,
+          updated: 0,
+          removed: 0,
+          priceChanges: 0,
+          skippedModels: 0,
+          providerCount: 1,
+          modelCount: 1,
+        },
+      }),
+    ).toBe(true);
+    expect(await state(t)).toMatchObject({ running: false, lastStatus: "ok", contentHash: "late" });
+  });
+
+  test("a run whose expired lease was taken over cannot finish", async () => {
+    const t = setup();
+    await t.mutation(internal.sync.begin, { runId: "a", force: true, cron: false });
+    vi.setSystemTime(NOW + 3 * LEASE_MS);
+    await t.mutation(internal.sync.begin, { runId: "c", force: true, cron: false });
     expect(
       await t.mutation(internal.sync.finish, {
         runId: "a",
@@ -633,6 +686,7 @@ describe("lease fencing", () => {
         durationMs: 1,
       }),
     ).toBe(false);
+    expect(await state(t)).toMatchObject({ runId: "c", running: true });
   });
 });
 
@@ -685,23 +739,24 @@ describe("configure and tick", () => {
     const t = setup();
     const invalid = (args: FunctionArgs<typeof api.config.update>) =>
       t.mutation(api.config.update, args);
-    const config = { data: { code: "MODELS_DEV_INVALID_ARGUMENT" } };
-    const source = { data: { code: "MODELS_DEV_INVALID_ARGUMENT" } };
-    await expect(invalid({ minIntervalMinutes: 5 })).rejects.toMatchObject(config);
-    await expect(invalid({ retentionDays: 0 })).rejects.toMatchObject(config);
-    await expect(invalid({ minModels: -1 })).rejects.toMatchObject(config);
-    await expect(invalid({ minProviders: -1 })).rejects.toMatchObject(config);
-    await expect(invalid({ sourceUrl: "http://example.com" })).rejects.toMatchObject(source);
-    await expect(
-      invalid({ sourceUrl: "https://user:pw@example.com/api.json" }),
-    ).rejects.toMatchObject(source);
-    await expect(invalid({ sourceUrl: "https://user@example.com/api.json" })).rejects.toMatchObject(
-      source,
+    await expectModelsDevError(invalid({ minIntervalMinutes: 5 }), "MODELS_DEV_INVALID_ARGUMENT");
+    await expectModelsDevError(invalid({ retentionDays: 0 }), "MODELS_DEV_INVALID_ARGUMENT");
+    await expectModelsDevError(invalid({ minModels: -1 }), "MODELS_DEV_INVALID_ARGUMENT");
+    await expectModelsDevError(invalid({ minProviders: -1 }), "MODELS_DEV_INVALID_ARGUMENT");
+    await expectModelsDevError(
+      invalid({ sourceUrl: "http://example.com" }),
+      "MODELS_DEV_INVALID_ARGUMENT",
     );
-    await expect(invalid({ sourceUrl: "nope" })).rejects.toMatchObject(source);
-    await expect(invalid({ retentionDays: 0 })).rejects.toMatchObject({
-      data: { code: "MODELS_DEV_INVALID_ARGUMENT" },
-    });
+    await expectModelsDevError(
+      invalid({ sourceUrl: "https://user:pw@example.com/api.json" }),
+      "MODELS_DEV_INVALID_ARGUMENT",
+    );
+    await expectModelsDevError(
+      invalid({ sourceUrl: "https://user@example.com/api.json" }),
+      "MODELS_DEV_INVALID_ARGUMENT",
+    );
+    await expectModelsDevError(invalid({ sourceUrl: "nope" }), "MODELS_DEV_INVALID_ARGUMENT");
+    await expectModelsDevError(invalid({ retentionDays: 0 }), "MODELS_DEV_INVALID_ARGUMENT");
     expect(await t.query(api.config.get, {})).toMatchObject({ minIntervalMinutes: 15 });
   });
 
@@ -740,6 +795,30 @@ describe("configure and tick", () => {
     expect(server.calls).toHaveLength(1);
   });
 
+  test("sync.run and tick record a failed sync instead of rethrowing", async () => {
+    const t = setup();
+    await relaxGuards(t);
+    catalogServer({ body: fixtureJson() }).failAll = true;
+    const result = await sync(t, false);
+    expect(result).toMatchObject({
+      status: "error",
+      errors: [
+        { source: "primary", code: "MODELS_DEV_PROVIDER_ERROR", retryable: true },
+        { source: "fallback", code: "MODELS_DEV_PROVIDER_ERROR", retryable: true },
+      ],
+    });
+    expect(await t.query(api.sync.getStatus, {})).toMatchObject({
+      state: "error",
+      running: false,
+      errors: result.errors,
+    });
+    vi.setSystemTime(NOW + 60 * 60_000);
+    await expect(t.action(internal.sync.tick, {})).resolves.toBeNull();
+    const afterTick = await t.query(api.sync.getStatus, {});
+    expect(afterTick).toMatchObject({ state: "error", running: false });
+    expect(afterTick.lastCheckedAt).toBe(NOW + 60 * 60_000);
+  });
+
   test("tick deletes price history older than the retention window in batches", async () => {
     const t = setup();
     await relaxGuards(t);
@@ -763,6 +842,7 @@ describe("configure and tick", () => {
       });
     });
     await t.action(internal.sync.tick, {});
+    await drain(t);
     const left = await changes(t);
     expect(left).toHaveLength(1);
     expect(left[0]?.changedAt).toBeGreaterThan(Date.now() - 2 * day);
@@ -788,7 +868,7 @@ describe("chunking", () => {
 });
 
 test("new models do not dilute the removal guard", async () => {
-  const t = componentTest();
+  const t = setupTest();
   await relaxGuards(t);
   const server = catalogServer({ body: fixtureJson() });
   await sync(t);
@@ -801,13 +881,12 @@ test("new models do not dilute the removal guard", async () => {
   });
   server.etag = '"new"';
   await t.run(async (ctx) => {
-    const row = requireValue(await ctx.db.query("syncState").first());
+    const row = required(await ctx.db.query("syncState").first(), "sync state");
     await ctx.db.patch("syncState", row._id, { lastCheckedAt: 1 });
   });
   expect(await sync(t, false)).toMatchObject({
     status: "partial",
     removed: 0,
-    removalSkipped: true,
   });
   expect(
     await t.query(api.models.get, { modelsDevProviderId: "openai", modelsDevModelId: "gpt-5.4" }),
@@ -815,7 +894,7 @@ test("new models do not dilute the removal guard", async () => {
 });
 
 test("interrupted catalog writes invalidate both cache validators", async () => {
-  const t = componentTest();
+  const t = setupTest();
   await relaxGuards(t);
   const server = catalogServer({ body: fixtureJson() });
   await sync(t);
@@ -827,12 +906,15 @@ test("interrupted catalog writes invalidate both cache validators", async () => 
     ],
     recordAdded: false,
   });
-  const recordedState = requireValue(await t.run((ctx) => ctx.db.query("syncState").first()));
+  const recordedState = required(
+    await t.run((ctx) => ctx.db.query("syncState").first()),
+    "sync state",
+  );
   expect(recordedState.etag).toBeUndefined();
   expect(recordedState.contentHash).toBeUndefined();
   await t.run((ctx) => ctx.db.patch("syncState", recordedState._id, { leaseExpiresAt: 1 }));
   expect(await sync(t)).toMatchObject({ status: "ok" });
-  expect(server.calls.at(-1)?.headers["if-none-match"]).toBeUndefined();
+  expect(new Headers(server.calls.at(-1)?.init.headers).get("if-none-match")).toBeNull();
   expect(
     await t.query(api.models.get, { modelsDevProviderId: "openai", modelsDevModelId: "gpt-5.4" }),
   ).toMatchObject({ name: fixtureModel("openai", "gpt-5.4").name });
@@ -841,7 +923,7 @@ test("interrupted catalog writes invalidate both cache validators", async () => 
 test.each([{ cost: "bad" }, { cost: [] }, { cost: 123 }])(
   "malformed cost preserves the stored price, case %#",
   async ({ cost }) => {
-    const t = componentTest();
+    const t = setupTest();
     await relaxGuards(t);
     const server = catalogServer({ body: fixtureJson() });
     await sync(t);
@@ -857,7 +939,7 @@ test.each([{ cost: "bad" }, { cost: [] }, { cost: 123 }])(
 );
 
 test("downloads stop before buffering more than 16 MiB", async () => {
-  const t = componentTest();
+  const t = setupTest();
   await relaxGuards(t);
   let cancelled = 0;
   let chunks = 0;
@@ -886,7 +968,7 @@ test("downloads stop before buffering more than 16 MiB", async () => {
 });
 
 test("a completed source without an etag clears the previous source etag", async () => {
-  const t = componentTest();
+  const t = setupTest();
   await relaxGuards(t);
   catalogServer({ body: fixtureJson() });
   await sync(t);
@@ -894,7 +976,7 @@ test("a completed source without an etag clears the previous source etag", async
   await t.mutation(internal.sync.finish, {
     runId: "new",
     status: "ok",
-    source: "https://mirror.example/api.json",
+    sourceUrl: "https://mirror.example/api.json",
     contentHash: "new",
     durationMs: 0,
   });
@@ -902,7 +984,7 @@ test("a completed source without an etag clears the previous source etag", async
 });
 
 test("sync failures never persist upstream text or broken Unicode", async () => {
-  const t = componentTest();
+  const t = setupTest();
   await relaxGuards(t);
   catalogServer({ body: JSON.stringify({ ["x".repeat(499) + "😀secret_from_body"]: null }) });
   const result = await sync(t);
@@ -925,7 +1007,7 @@ test("sync failures never persist upstream text or broken Unicode", async () => 
 });
 
 test("tuple identities cannot collide during removal", async () => {
-  const t = componentTest();
+  const t = setupTest();
   await relaxGuards(t);
   const template = rawModel(fixtureCatalog, "openai", "gpt-5-mini");
   const server = catalogServer({
@@ -958,7 +1040,7 @@ test("indexed UTF-8 strings are bounded and skipped rows survive", async () => {
   expect(
     normalizeModel("p", "m", { ...template, canonical_model_id: "😀".repeat(256) }),
   ).not.toBeNull();
-  const t = componentTest();
+  const t = setupTest();
   await relaxGuards(t);
   const server = catalogServer({ body: fixtureJson() });
   await sync(t);
@@ -977,7 +1059,7 @@ test("indexed UTF-8 strings are bounded and skipped rows survive", async () => {
 });
 
 test("losing more than 20 percent of stored prices writes no catalog rows", async () => {
-  const t = componentTest();
+  const t = setupTest();
   await relaxGuards(t);
   const server = catalogServer({ body: fixtureJson() });
   await sync(t);
@@ -994,15 +1076,22 @@ test("losing more than 20 percent of stored prices writes no catalog rows", asyn
   });
   server.etag = '"unpriced"';
   await t.run(async (ctx) => {
-    const row = requireValue(await ctx.db.query("syncState").first());
+    const row = required(await ctx.db.query("syncState").first(), "sync state");
     await ctx.db.patch("syncState", row._id, { lastCheckedAt: 1 });
   });
   expect(await sync(t, false)).toMatchObject({
     status: "partial",
+    partialReason: "price_loss",
     updated: 0,
     added: 0,
     priceChanges: 0,
-    removalSkipped: true,
+  });
+  expect(await state(t)).toMatchObject({
+    lastStatus: "partial",
+    partialReason: "price_loss",
+    modelCount: FIXTURE_MODEL_COUNT,
+    updated: 0,
+    added: 0,
   });
   expect(
     await t.run(async (ctx) => ({
@@ -1011,11 +1100,11 @@ test("losing more than 20 percent of stored prices writes no catalog rows", asyn
       history: await ctx.db.query("priceChanges").take(100),
     })),
   ).toEqual(before);
-  expect(await sync(t, true)).toMatchObject({ status: "ok", updated: 19 });
+  expect(await sync(t, true)).toMatchObject({ status: "ok", updated: FIXTURE_MODEL_COUNT - 3 });
 });
 
 test("failed sources remain ordered diagnostics including successful fallback", async () => {
-  const t = componentTest();
+  const t = setupTest();
   await relaxGuards(t);
   stubFetch((call) =>
     call.url.includes("models.dev")
@@ -1045,7 +1134,7 @@ test("failed sources remain ordered diagnostics including successful fallback", 
 });
 
 test("malformed providers preserve stored rows while healthy providers sync", async () => {
-  const t = componentTest();
+  const t = setupTest();
   await relaxGuards(t);
   const server = catalogServer({ body: fixtureJson() });
   await sync(t);
@@ -1070,7 +1159,7 @@ test("malformed providers preserve stored rows while healthy providers sync", as
     ).toEqual(before);
     expect(await t.query(api.providers.get, { modelsDevProviderId: "openai" })).not.toBeNull();
   }
-  await t.mutation(api.config.update, { minProviders: 5 });
+  await t.mutation(api.config.update, { minProviders: FIXTURE_PROVIDER_COUNT });
   server.etag = '"floor"';
   server.body = server.body + " ";
   expect(await sync(t)).toMatchObject({
@@ -1080,7 +1169,7 @@ test("malformed providers preserve stored rows while healthy providers sync", as
 });
 
 test("price-loss guard permits exactly 20 percent and counts only stored priced models", async () => {
-  const t = componentTest();
+  const t = setupTest();
   await relaxGuards(t);
   const template = rawModel(fixtureCatalog, "openai", "gpt-5-mini");
   const initial = {
@@ -1091,12 +1180,12 @@ test("price-loss guard permits exactly 20 percent and counts only stored priced 
   const server = catalogServer({ body: JSON.stringify(initial) });
   await sync(t);
   const degraded = structuredClone(initial);
-  for (const id of ["m-0", "m-1"]) delete requireValue(degraded.p.models[id]).cost;
+  for (const id of ["m-0", "m-1"]) delete required(degraded.p.models[id], `model ${id}`).cost;
   for (let i = 0; i < 20; i++) degraded.p.models[`new-${i}`] = { ...template };
   server.body = JSON.stringify(degraded);
   server.etag = '"twenty-percent"';
   await t.run(async (ctx) => {
-    const row = requireValue(await ctx.db.query("syncState").first());
+    const row = required(await ctx.db.query("syncState").first(), "sync state");
     await ctx.db.patch("syncState", row._id, { lastCheckedAt: 1 });
   });
   expect(await sync(t, false)).toMatchObject({ status: "ok", updated: 2, added: 20 });
@@ -1104,5 +1193,110 @@ test("price-loss guard permits exactly 20 percent and counts only stored priced 
     await t.query(api.models.get, { modelsDevProviderId: "p", modelsDevModelId: "m-0" }),
   ).toMatchObject({
     hasCost: false,
+  });
+});
+
+function streamedResponse(body: string, chunkBytes: number, headers?: Record<string, string>) {
+  const bytes = new TextEncoder().encode(body);
+  let offset = 0;
+  return new Response(
+    new ReadableStream({
+      pull(controller) {
+        if (offset >= bytes.byteLength) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(bytes.slice(offset, offset + chunkBytes));
+        offset += chunkBytes;
+      },
+    }),
+    { headers },
+  );
+}
+
+test("a catalog streamed without content-length grows its buffer and reads completely", async () => {
+  const t = setupTest();
+  await relaxGuards(t);
+  const body = fixtureJson().padEnd(3 * 1024 * 1024 + 7, " ");
+  stubFetch(() => streamedResponse(body, 64 * 1024));
+  expect(await sync(t)).toMatchObject({ status: "ok", modelCount: FIXTURE_MODEL_COUNT });
+});
+
+test("a content-length below the decoded body size still reads the whole catalog", async () => {
+  const t = setupTest();
+  await relaxGuards(t);
+  const body = fixtureJson();
+  stubFetch(() => streamedResponse(body, 4096, { "content-length": "100" }));
+  expect(await sync(t)).toMatchObject({ status: "ok", modelCount: FIXTURE_MODEL_COUNT });
+});
+
+test("a content-length above 16 MiB is rejected before reading", async () => {
+  const t = setupTest();
+  await relaxGuards(t);
+  let pulls = 0;
+  stubFetch(
+    () =>
+      new Response(
+        new ReadableStream({
+          pull(controller) {
+            pulls++;
+            controller.enqueue(new Uint8Array(1024));
+          },
+        }),
+        { headers: { "content-length": String(16 * 1024 * 1024 + 1) } },
+      ),
+  );
+  expect(await sync(t)).toMatchObject({
+    status: "error",
+    errors: [{ code: "MODELS_DEV_CATALOG_TOO_LARGE" }, { code: "MODELS_DEV_CATALOG_TOO_LARGE" }],
+  });
+  expect(pulls).toBeLessThanOrEqual(2);
+});
+
+test("a catalog at live size syncs every provider and model", { timeout: 120_000 }, async () => {
+  const t = setupTest();
+  const liveProviderCount = 228;
+  const liveModelCount = 8773;
+  const template = rawModel(fixtureCatalog, "openai", "gpt-5.4");
+  const catalog: Record<string, { name: string; models: Record<string, RawModel> }> = {};
+  for (let p = 0; p < liveProviderCount; p++) {
+    const modelCount =
+      Math.floor(liveModelCount / liveProviderCount) +
+      (p < liveModelCount % liveProviderCount ? 1 : 0);
+    catalog[`provider-${p}`] = {
+      name: `Provider ${p}`,
+      models: Object.fromEntries(
+        Array.from({ length: modelCount }, (_, m) => [
+          `model-${m}`,
+          { ...template, id: `model-${m}`, name: `Model ${p}-${m}` },
+        ]),
+      ),
+    };
+  }
+  const body = JSON.stringify(catalog);
+  stubFetch(() => new Response(body, { headers: { "content-length": String(body.length) } }));
+  expect(await sync(t)).toMatchObject({
+    status: "ok",
+    providerCount: liveProviderCount,
+    modelCount: liveModelCount,
+    added: liveModelCount,
+  });
+  expect(await t.run((ctx) => ctx.db.query("models").take(10_000))).toHaveLength(liveModelCount);
+  expect(await t.run((ctx) => ctx.db.query("providers").take(1000))).toHaveLength(
+    liveProviderCount,
+  );
+});
+
+test("a provider row counts only its usable models", async () => {
+  const t = setupTest();
+  await relaxGuards(t);
+  catalogServer({
+    body: fixtureJson((c) => {
+      rawModel(c, "anthropic", "claude-opus-4-5").cost = { input: "free", output: 1 };
+    }),
+  });
+  expect(await sync(t)).toMatchObject({ status: "ok", skippedModels: 1 });
+  expect(await t.query(api.providers.get, { modelsDevProviderId: "anthropic" })).toMatchObject({
+    modelCount: Object.keys(modelsOf(fixtureCatalog, "anthropic")).length - 1,
   });
 });
