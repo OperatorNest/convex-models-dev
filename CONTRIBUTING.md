@@ -1,49 +1,35 @@
 # Contributing
 
-This component mirrors the public [models.dev](https://models.dev) catalog into a Convex deployment and prices token usage from it. Before proposing a public API change, read [README](README.md) and the ADRs in [docs/adr/](docs/adr/). Keep changes focused on the catalog sync, the queries over it, the cost estimator and the Convex component boundary.
+Read [README](README.md), [AGENTS.md](AGENTS.md) and the [ADRs](docs/adr/). Keep changes within the catalog sync, queries, estimator and example app.
 
-## Setup
+## Setup and checks
 
-Use Node 26 and pnpm 12.9.1 through mise. Consumers need Node.js 22.19 or newer. Run `mise trust && mise install` and `mise exec -- pnpm install --frozen-lockfile`.
-
-In a fresh checkout, create an anonymous local Convex deployment and generate the component and example APIs:
+Use Node 24 and pnpm 12.9.1 through mise:
 
 ```sh
-CONVEX_AGENT_MODE=anonymous pnpm exec convex init
-pnpm build:codegen
+mise trust && mise install
+mise exec -- pnpm install --frozen-lockfile
+CONVEX_AGENT_MODE=anonymous mise exec -- pnpm exec convex init
+mise exec -- pnpm build:codegen
+mise exec -- pnpm check
+mise exec -- pnpm smoke
 ```
 
-Codegen runs component codegen, builds the package so the example can resolve its dist config export, and runs example codegen against the local backend. It does not configure a cloud deployment or require a login.
+Initialize only an anonymous local deployment for codegen. Smoke creates a disposable anonymous backend and serves a local fixture; neither tests nor smoke call live catalog providers. It removes inherited deployment selectors. `convex-test` accepts some calls the real runtime rejects, so run smoke for component, schema and shared runtime changes.
 
-## What to know about this component
+## Change requirements
 
-- It has no secrets, no env vars and no webhooks, so there is nothing to configure and no signature to verify ([ADR 0002](docs/adr/0002-no-secrets-webhooks-or-test-mode.md)).
-- The trust boundary is the upstream catalog. Treat `api.json` as untrusted: validate every row, skip bad models without deleting stored rows, and keep the size guard (`minProviders`, `minModels`) and the 20% removal guard.
-- Sync runs hold a lease and every write carries the run id. A change to the sync path must keep writes lease-fenced and must write the etag last.
-- Tests never call the real models.dev. They use the fake server in `src/test-helpers.ts` and the 21-model fixture in `src/fixtures/`. Only `pnpm smoke` touches the public API.
-- Public component functions need `args` and `returns` validators. Reads stay bounded and go through indexes. Generated files change only through code generation.
+- Commit messages and PR titles follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)
+  (`feat:`, `fix:`, `docs:`, `test:`, `chore:`); a breaking change adds `!` after the type.
+- Until 1.0.0, a breaking change ships without compatibility code, deprecation periods or data
+  migrations; its changeset is a `minor` bump that states what breaks.
 
-## Reporting a bug
+Update affected examples, README claims and ADR contracts. Add a changeset for consumer-visible changes. Keep reads bounded, indexed and lease-fenced writes intact; use fixed package errors. Regenerate bindings from inputs and include their diffs. Never include credentials or private prompts in fixtures or logs. Run the checks listed in AGENTS.md and report their exit codes.
 
-For a bug report, provide the package, Convex, and Node.js versions, runtime, operation, a minimal reproduction, expected result, and actual result. For catalog or pricing issues, include the provider and model identifiers and relevant public catalog values. Do not include credentials, access tokens, private prompts, customer data, or unredacted logs. Security reports go through [private vulnerability reporting](https://github.com/OperatorNest/convex-models-dev/security/advisories/new).
+## Reports and releases
 
-Follow the [OperatorNest Code of Conduct](https://github.com/OperatorNest/.github/blob/main/CODE_OF_CONDUCT.md) and [support guidance](https://github.com/OperatorNest/.github/blob/main/SUPPORT.md).
+Bug reports include package, Convex and Node versions, deployment type, operation, provider/model IDs when relevant, minimal reproduction, expected result and actual result. Remove credentials, private prompts, usage data and customer data. Report vulnerabilities [privately](https://github.com/OperatorNest/convex-models-dev/security/advisories/new).
 
-## Changes
+Follow the [Code of Conduct](https://github.com/OperatorNest/.github/blob/main/CODE_OF_CONDUCT.md) and [support guidance](https://github.com/OperatorNest/.github/blob/main/SUPPORT.md).
 
-Describe the user-visible behavior and update the relevant example, README table or ADR. Add a changeset (`pnpm changeset`) for a user-facing change. Run the checks for your change as listed in [AGENTS.md](AGENTS.md). The full local check is:
-
-```sh
-pnpm check
-pnpm smoke
-```
-
-Never add real credentials or customer data to tests or examples. This component needs none.
-
-## Releasing
-
-1. Add a changeset to each user-facing PR (`pnpm changeset`).
-2. To cut a release, a maintainer runs `pnpm changeset version` on a branch. That consumes the changesets, bumps `package.json` and updates `CHANGELOG.md`. Merge it through a PR.
-3. On `main`, the Release workflow runs CI and the smoke test on the same commit. If the `package.json` version is not yet on npm, it publishes through npm trusted publishing (no tokens) and pushes a `v<version>` tag.
-
-The first version of each package is published manually by a maintainer, before trusted publishing can be configured for it. Publishing, pushing, deploying and registry submissions require explicit authorization.
+A maintainer runs `pnpm changeset version` on a branch and merges the version PR. On `main`, the Release workflow publishes unpublished package versions after CI and smoke pass, then tags the published `gitHead`. Publishing, pushing, deploying and registry submissions require explicit authorization.

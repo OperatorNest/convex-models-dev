@@ -1,7 +1,7 @@
 import { convexTest } from "convex-test";
 import { ConvexError } from "convex/values";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { api, components } from "../../example/convex/_generated/api.js";
+import { internal, components } from "../../example/convex/_generated/api.js";
 import exampleSchema from "../../example/convex/schema.js";
 import { fixtureJson, FIXTURE_MODEL_COUNT } from "../fixtures/index.js";
 import { register } from "../test.js";
@@ -22,12 +22,11 @@ function setup(options?: ModelsDevOptions) {
   return { t, client };
 }
 
-/** Syncs the fixture catalog through the example app, then returns a client with `options`. */
 async function synced(options?: ModelsDevOptions) {
   const harness = setup(options);
   catalogServer({ body: fixtureJson() });
-  await harness.t.mutation(api.example.configureSync, { minProviders: 1, minModels: 1 });
-  await harness.t.action(api.example.syncNow, { force: true });
+  await harness.t.mutation(internal.example.configureSync, { minProviders: 1, minModels: 1 });
+  await harness.t.action(internal.example.syncNow, { force: true });
   return harness;
 }
 
@@ -58,9 +57,11 @@ describe("every public client method", () => {
   test("models.cheapest, equivalents, priceHistory, estimateCost", async () => {
     const { t, client } = await synced();
     await t.run(async (ctx) => {
-      expect((await client.models.cheapest(ctx)).length).toBeGreaterThan(0);
+      expect((await client.models.cheapest(ctx)).models.length).toBeGreaterThan(0);
       expect(
-        (await client.models.cheapest(ctx, { toolCall: true, limit: 2 })).every((m) => m.toolCall),
+        (await client.models.cheapest(ctx, { toolCall: true, limit: 2 })).models.every(
+          (m) => m.toolCall,
+        ),
       ).toBe(true);
       expect(await client.models.equivalents(ctx, { canonicalModelId: "nobody/none" })).toEqual([]);
       expect(
@@ -103,20 +104,20 @@ describe("every public client method", () => {
   test("sync.now with and without args, and sync.status", async () => {
     const { t, client } = setup();
     catalogServer({ body: fixtureJson() });
-    await t.mutation(api.example.configureSync, { minProviders: 1, minModels: 1 });
+    await t.mutation(internal.example.configureSync, { minProviders: 1, minModels: 1 });
     expect(await t.run((ctx) => client.sync.status(ctx))).toMatchObject({
       state: "never_synced",
       running: false,
     });
-    expect(await t.action(api.example.syncNow, {})).toMatchObject({
+    expect(await t.action(internal.example.syncNow, {})).toMatchObject({
       status: "ok",
       modelCount: FIXTURE_MODEL_COUNT,
     });
-    expect(await t.action(api.example.syncNow, {})).toMatchObject({
+    expect(await t.action(internal.example.syncNow, {})).toMatchObject({
       status: "skipped",
       reason: "min_interval",
     });
-    expect(await t.action(api.example.syncNow, { force: true })).toMatchObject({
+    expect(await t.action(internal.example.syncNow, { force: true })).toMatchObject({
       status: "not_modified",
     });
     expect(await t.run((ctx) => client.sync.status(ctx))).toMatchObject({
@@ -181,8 +182,50 @@ describe("isModelsDevError", () => {
     expect(isModelsDevError(new ConvexError({ code }))).toBe(false);
     expect(isModelsDevError(new ConvexError({ code, message: 5 }))).toBe(false);
     expect(isModelsDevError(new ConvexError({ code, message: "x", retryable: "yes" }))).toBe(false);
-    expect(isModelsDevError(new ConvexError({ code, message: "x", retryable: true }))).toBe(true);
+    expect(isModelsDevError(new ConvexError({ code, message: "x", retryable: true }))).toBe(false);
     expect(isModelsDevError(new ConvexError({ code, message: "x" }))).toBe(true);
     expect(isModelsDevError(null)).toBe(false);
+  });
+});
+
+test("client copies declared arguments and nested options", async () => {
+  const { t, client } = await synced({ aliases: { gateway: "openai" } });
+  await t.run(async (ctx) => {
+    const extra = { unexpected: "ignored" };
+    expect(
+      await client.models.get(ctx, { providerId: "openai", modelId: "gpt-5.4", ...extra }),
+    ).not.toBeNull();
+    expect(await client.models.getByKey(ctx, { key: "openai/gpt-5.4", ...extra })).not.toBeNull();
+    expect(
+      await client.models.resolve(ctx, { provider: "gateway", model: "gpt-5.4", ...extra }),
+    ).not.toBeNull();
+    expect(
+      (
+        await client.models.list(ctx, {
+          paginationOpts: { numItems: 1, cursor: null, ...extra },
+          ...extra,
+        })
+      ).page,
+    ).toHaveLength(1);
+    expect(await client.models.search(ctx, { query: "gpt", ...extra })).not.toEqual([]);
+    expect((await client.models.cheapest(ctx, { limit: 1, ...extra })).models).not.toEqual([]);
+    expect(await client.models.equivalents(ctx, { canonicalModelId: "none", ...extra })).toEqual(
+      [],
+    );
+    expect(
+      await client.models.priceHistory(ctx, { providerId: "openai", modelId: "gpt-5.4", ...extra }),
+    ).toEqual([]);
+    expect(
+      await client.models.estimateCost(ctx, {
+        provider: "gateway",
+        model: "gpt-5.4",
+        usage: { inputTokens: 1, ...extra },
+        ...extra,
+      }),
+    ).toMatchObject({ known: true });
+    expect(await client.providers.get(ctx, { providerId: "openai", ...extra })).not.toBeNull();
+    expect(await client.config.update(ctx, { enabled: true, ...extra })).toMatchObject({
+      enabled: true,
+    });
   });
 });

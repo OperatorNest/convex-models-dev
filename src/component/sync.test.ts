@@ -31,9 +31,9 @@ function fixtureModelInput() {
 }
 
 const sync = (t: T, force = true) => t.action(api.sync.syncNow, { force });
-const models = (t: T) => t.run((ctx) => ctx.db.query("models").collect());
+const models = (t: T) => t.run((ctx) => ctx.db.query("models").take(2000));
 const state = (t: T) => t.run((ctx) => ctx.db.query("syncState").first());
-const changes = (t: T) => t.run((ctx) => ctx.db.query("priceChanges").collect());
+const changes = (t: T) => t.run((ctx) => ctx.db.query("priceChanges").take(2000));
 
 const NOW = Date.UTC(2026, 9, 4, 12);
 const LEASE_MS = 3 * 60 * 1000;
@@ -115,7 +115,7 @@ describe("first sync, 200 then 304", () => {
     expect(server.calls[1]?.headers["if-none-match"]).toBe('"etag-1"');
     expect(await models(t)).toEqual(before);
     expect(await state(t)).toMatchObject({ lastStatus: "not_modified" });
-    expect(await state(t)).not.toHaveProperty("lastError");
+    expect((await state(t))?.errors).toEqual([]);
     expect((await t.query(api.sync.status, {})).state).toBe("ok");
   });
 
@@ -124,7 +124,7 @@ describe("first sync, 200 then 304", () => {
     await relaxGuards(t);
     const server = catalogServer({ body: fixtureJson() });
     await sync(t, false);
-    expect(await sync(t, false)).toEqual({ status: "skipped", reason: "min_interval" });
+    expect(await sync(t, false)).toEqual({ status: "skipped", reason: "min_interval", errors: [] });
     expect(server.calls).toHaveLength(1);
     expect((await sync(t, true)).status).toBe("not_modified");
     expect(server.calls).toHaveLength(2);
@@ -151,7 +151,7 @@ describe("content hash and change detection", () => {
     const server = catalogServer({ body: fixtureJson() });
     await sync(t);
     const before = await models(t);
-    // Whitespace changes the body hash but not any normalized row.
+
     server.body = JSON.stringify(JSON.parse(server.body), null, 1);
     server.etag = '"etag-2"';
     const result = await sync(t);
@@ -296,7 +296,7 @@ describe("removal guard", () => {
       delete modelsOf(c, "openai")["gpt-4o"];
     });
     server.etag = '"etag-2"';
-    // Backdate the last check so a non-forced run passes the interval floor.
+
     await t.run(async (ctx) => {
       const row = await ctx.db.query("syncState").first();
       await ctx.db.patch("syncState", requireValue(row)._id, { lastCheckedAt: 1 });
@@ -305,7 +305,7 @@ describe("removal guard", () => {
     expect(result).toMatchObject({ status: "partial", removed: 0, removalSkipped: true });
     expect(await models(t)).toHaveLength(FIXTURE_MODEL_COUNT);
     expect(await t.query(api.providers.list, {})).toHaveLength(FIXTURE_PROVIDER_COUNT);
-    // The skipped removal is not recorded as a completed sync, so it is retried.
+
     expect(await state(t)).toMatchObject({
       removalSkipped: true,
       lastStatus: "partial",
@@ -356,12 +356,12 @@ describe("count guard", () => {
     const server = catalogServer({ body: fixtureJson() });
     const result = await sync(t);
     expect(result.status).toBe("error");
-    expect(result.reason).toContain("too small");
+    expect(result.error?.code).toBe("MODELS_DEV_CATALOG_TOO_SMALL");
     expect(await models(t)).toHaveLength(0);
     expect(await state(t)).toMatchObject({ lastStatus: "error", running: false });
     expect(await state(t)).not.toHaveProperty("etag");
     expect((await t.query(api.sync.status, {})).state).toBe("error");
-    // The fallback host was tried too, then everything failed.
+
     expect(server.calls.map((c) => new URL(c.url).host)).toEqual([
       "models.dev",
       "models.opencode.ai",
@@ -391,7 +391,7 @@ describe("count guard", () => {
     expect((await t.query(api.sync.status, {})).state).toBe("error");
   });
 
-  test("a malformed provider aborts the sync and never deletes its stored rows", async () => {
+  test("a malformed provider is skipped and never deletes its stored rows", async () => {
     const t = setup();
     await relaxGuards(t);
     const server = catalogServer({ body: fixtureJson() });
@@ -407,11 +407,10 @@ describe("count guard", () => {
       });
       server.etag = `"etag-${JSON.stringify(broken)}"`;
       const result = await sync(t);
-      expect(result).toMatchObject({ status: "error" });
-      expect(result.reason).toContain("MODELS_DEV_INVALID_CATALOG");
+      expect(result).toMatchObject({ status: "ok" });
       expect(await models(t)).toHaveLength(before.length);
     }
-    expect(await state(t)).toMatchObject({ lastStatus: "error", running: false });
+    expect(await state(t)).toMatchObject({ lastStatus: "ok", running: false });
   });
 
   test("rejects a payload that is not a provider map", async () => {
@@ -445,7 +444,7 @@ describe("source fallback", () => {
     server.failAll = true;
     const result = await sync(t);
     expect(result.status).toBe("error");
-    expect(result.reason).toContain("HTTP 503");
+    expect(result.error).toMatchObject({ code: "MODELS_DEV_FETCH_FAILED", providerStatus: 503 });
     expect(await models(t)).toHaveLength(FIXTURE_MODEL_COUNT);
   });
 
@@ -469,7 +468,7 @@ describe("source fallback", () => {
     });
     const result = await sync(t);
     expect(result.status).toBe("error");
-    expect(result.reason).toContain("network down");
+    expect(result.error?.code).toBe("MODELS_DEV_FETCH_FAILED");
   });
 });
 
@@ -488,7 +487,7 @@ describe("lease", () => {
     expect(live.running).toBe(true);
     expect(live.leaseExpiresAt).toBe(NOW + LEASE_MS);
     vi.setSystemTime(NOW + LEASE_MS + 1);
-    // The query does not read the clock: the stored lease is reported as is.
+
     expect(await t.query(api.sync.status, {})).toMatchObject({
       running: true,
       leaseExpiresAt: NOW + LEASE_MS,
@@ -515,7 +514,13 @@ describe("lease", () => {
       await t.mutation(internal.sync.finish, {
         runId: "b",
         status: "error",
-        error: "x",
+        errors: [
+          {
+            source: "primary",
+            code: "MODELS_DEV_SYNC_FAILED",
+            message: "The catalog write failed.",
+          },
+        ],
         durationMs: 1,
       }),
     ).toBe(true);
@@ -537,7 +542,7 @@ describe("lease", () => {
     );
     server.etag = '"etag-2"';
     const result = await sync(t);
-    expect(result).toMatchObject({ status: "error", reason: "lease_lost" });
+    expect(result).toMatchObject({ status: "error", error: { code: "MODELS_DEV_LEASE_LOST" } });
     expect(await state(t)).toMatchObject({ runId: "thief", running: true });
   });
 
@@ -569,7 +574,7 @@ describe("lease fencing", () => {
       }),
     );
     const result = await sync(t);
-    expect(result).toMatchObject({ status: "error", reason: "lease_lost" });
+    expect(result).toMatchObject({ status: "error", error: { code: "MODELS_DEV_LEASE_LOST" } });
     expect(await models(t)).toHaveLength(0);
     expect(await t.query(api.providers.list, {})).toHaveLength(0);
     expect(await state(t)).toMatchObject({ runId: "thief", running: true });
@@ -601,7 +606,13 @@ describe("lease fencing", () => {
       await t.mutation(internal.sync.finish, {
         runId: "a",
         status: "error",
-        error: "x",
+        errors: [
+          {
+            source: "primary",
+            code: "MODELS_DEV_SYNC_FAILED",
+            message: "The catalog write failed.",
+          },
+        ],
         durationMs: 1,
       }),
     ).toBe(false);
@@ -620,7 +631,7 @@ describe("size guard on usable rows", () => {
     catalogServer({ body });
     const result = await sync(t);
     expect(result.status).toBe("error");
-    expect(result.reason).toContain("too small");
+    expect(result.error?.code).toBe("MODELS_DEV_CATALOG_TOO_SMALL");
     expect(await models(t)).toHaveLength(0);
   });
 });
@@ -671,7 +682,7 @@ describe("configure and tick", () => {
       source,
     );
     await expect(invalid({ sourceUrl: "nope" })).rejects.toMatchObject(source);
-    await expect(invalid({ retentionDays: 0 })).rejects.toThrow(/retentionDays/);
+    await expect(invalid({ retentionDays: 0 })).rejects.toThrow(/configuration value/);
     expect(await t.query(api.config.get, {})).toMatchObject({ minIntervalMinutes: 15 });
   });
 

@@ -1,16 +1,18 @@
+import { ConvexError } from "convex/values";
 import { expect, test } from "vitest";
-import { modelsDevError } from "./errors.js";
+import { isModelsDevError, modelsDevError, MODELS_DEV_ERROR_CODES } from "./errors.js";
 
-test("builds a ConvexError with a code and message, and omits retryable by default", () => {
-  const error = modelsDevError("MODELS_DEV_INVALID_CONFIG", "bad");
-  expect(error.data).toEqual({ code: "MODELS_DEV_INVALID_CONFIG", message: "bad" });
+test("each error code has one fixed message", () => {
+  for (const code of MODELS_DEV_ERROR_CODES) {
+    const error = modelsDevError(code);
+    expect(isModelsDevError(error)).toBe(true);
+    expect(error.data.message.endsWith(".")).toBe(true);
+  }
 });
-
-test("carries retryable when given", () => {
-  const error = modelsDevError("MODELS_DEV_INVALID_CONFIG", "bad", false);
-  expect(error.data).toEqual({
-    code: "MODELS_DEV_INVALID_CONFIG",
-    message: "bad",
-    retryable: false,
-  });
+test("error guards validate optional HTTP status and reject undeclared fields", () => {
+  const data = modelsDevError("MODELS_DEV_FETCH_FAILED", 503).data;
+  expect(isModelsDevError(new ConvexError(data))).toBe(true);
+  for (const providerStatus of [NaN, Infinity, 0, 600, 200.5, "503", null])
+    expect(isModelsDevError(new ConvexError({ ...data, providerStatus }))).toBe(false);
+  expect(isModelsDevError(new ConvexError({ ...data, retryable: true }))).toBe(false);
 });

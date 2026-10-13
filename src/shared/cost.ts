@@ -1,3 +1,4 @@
+import { modelsDevError } from "./errors.js";
 import { isRecord } from "./guards.js";
 import type {
   CostBreakdown,
@@ -8,7 +9,6 @@ import type {
   UsageInput,
 } from "./validators.js";
 
-/** The pricing subset of a stored model row. */
 export type CostModel = Pick<
   ModelRow,
   | "costInput"
@@ -21,14 +21,12 @@ export type CostModel = Pick<
   | "tiers"
   | "modes"
 > & {
-  /** When the stored price was last written; echoed as `priceSnapshotAt`. */
   updatedAt?: number;
 };
 
 export type EstimateCostOptions = {
-  /** An `experimental.modes` key such as "fast" or "flex". */
   mode?: string;
-  /** Whether `inputTokens` already includes cache tokens. Default true. */
+
   inputIncludesCache?: boolean;
 };
 
@@ -44,8 +42,15 @@ const PRICE_KEYS: (keyof PriceFields)[] = [
   "outputAudio",
 ];
 
+export function validateUsage(usage: UsageInput): void {
+  for (const value of Object.values(usage)) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 0))
+      throw modelsDevError("MODELS_DEV_INVALID_ARGUMENT");
+  }
+}
+
 function tokens(value: number | undefined): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  return value ?? 0;
 }
 
 function defined(value: number | undefined): number | undefined {
@@ -70,7 +75,6 @@ function storedPrices(model: CostModel): PriceFields {
   return out;
 }
 
-/** Layers `over` on `base`; fields `over` omits fall through. */
 function overlay(base: PriceFields, over: PriceFields | undefined): PriceFields {
   if (!over) return base;
   const out: PriceFields = { ...base };
@@ -92,21 +96,16 @@ function selectTier(tiers: PriceTier[] | undefined, prompt: number): PriceTier |
   return picked;
 }
 
-/** tokens * (USD per 1M) in integer nano-USD, rounded once. */
 function nano(count: number, pricePerMillion: number): number {
   return Math.round(count * pricePerMillion * 1e3);
 }
 
-/**
- * Estimates the USD cost of one request from stored models.dev pricing.
- * Works in integer nano-USD, and returns `{ known: false }` (never 0) when the
- * model has no usable input/output price.
- */
 export function estimateCost(
   model: CostModel,
   usage: UsageInput,
   opts: EstimateCostOptions = {},
 ): CostEstimate {
+  validateUsage(usage);
   const cacheRead = tokens(usage.cacheReadTokens ?? usage.cachedInputTokens);
   const cacheWrite = tokens(usage.cacheWriteTokens ?? usage.cacheWriteInputTokens);
   const inputAudio = tokens(usage.inputAudioTokens);
@@ -119,6 +118,7 @@ export function estimateCost(
   if (opts.inputIncludesCache === false && reported !== undefined) {
     prompt = tokens(reported) + cacheRead + cacheWrite;
   }
+  if (!Number.isSafeInteger(prompt)) return UNKNOWN;
   const uncachedInput =
     explicitNoCache !== undefined
       ? noCache
@@ -137,15 +137,19 @@ export function estimateCost(
   const base = table;
   let mode: string | null = null;
   const modeEntry = opts.mode !== undefined ? model.modes?.[opts.mode] : undefined;
-  if (opts.mode !== undefined && modeEntry?.cost) {
-    table = overlay(table, modeEntry.cost);
+  const modeTier = selectTier(modeEntry?.tiers, prompt);
+  const modePriced = PRICE_KEYS.some(
+    (key) =>
+      defined(modeEntry?.cost?.[key]) !== undefined || defined(modeTier?.[key]) !== undefined,
+  );
+  if (opts.mode !== undefined && !modePriced) return UNKNOWN;
+  if (opts.mode !== undefined) {
+    table = overlay(table, modeEntry?.cost);
     mode = opts.mode;
   }
 
   let tierSize: number | null = null;
   if (mode !== null && modeEntry?.tiers) {
-    // The mode defines its own tiers: they apply on top of the mode price.
-    const modeTier = selectTier(modeEntry.tiers, prompt);
     if (modeTier) {
       table = overlay(table, modeTier);
       tierSize = modeTier.size;
@@ -156,7 +160,6 @@ export function estimateCost(
       tierSize = tier.size;
       if (mode === null) table = overlay(table, tier);
       else {
-        // Mode pricing wins: a base tier may raise, but never lower, the mode's rate.
         const tierTable = overlay(base, tier);
         const merged: PriceFields = {};
         for (const key of PRICE_KEYS) {
@@ -201,6 +204,8 @@ export function estimateCost(
     outputAudio: nano(outputAudio, outputAudioRate),
   };
   const nanoUsd = Object.values(terms).reduce((sum, term) => sum + term, 0);
+  if (!Object.values(terms).every(Number.isSafeInteger) || !Number.isSafeInteger(nanoUsd))
+    return UNKNOWN;
   const breakdown: CostBreakdown = {
     uncachedInput: terms.uncachedInput / 1e9,
     cacheRead: terms.cacheRead / 1e9,
@@ -231,11 +236,6 @@ function obj(value: unknown): Record<string, unknown> | undefined {
   return isRecord(value) ? value : undefined;
 }
 
-/**
- * Maps `@convex-dev/agent` / AI SDK usage (v5, v6 and v7 spellings) plus
- * optional `providerMetadata` to a {@link UsageInput}. Provider metadata only
- * fills cache fields that `usage` lacks.
- */
 export function usageFromAgent(args: { usage?: unknown; providerMetadata?: unknown }): UsageInput {
   const usage = obj(args.usage) ?? {};
   const inputDetails = obj(usage.inputTokenDetails) ?? {};

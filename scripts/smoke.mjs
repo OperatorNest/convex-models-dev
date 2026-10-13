@@ -1,307 +1,478 @@
-// Real-runtime smoke test on the anonymous local Convex backend (architecture rule 13).
-// Syncs the public models.dev catalog through the example app and checks the main flows.
-// Works locally and on a fresh CI checkout: no login, no committed .env.local.
-// Usage: pnpm smoke
-import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import {
+  cpSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+  rmSync,
+  symlinkSync,
+  mkdirSync,
+  readdirSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { createServer as netServer } from "node:net";
+import { createServer } from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
+import { ConvexHttpClient } from "convex/browser";
+import { anyApi } from "convex/server";
+import ts from "typescript";
 import { acquireLock } from "./with-local-lock.mjs";
 
-const ENV_FILE = ".env.local";
-const READY_TIMEOUT_MS = 120_000;
-const POLL_MS = 1_000;
-// A run killed mid-sync (for example by stopping the local backend) holds its lease for 3 minutes.
-const LEASE_WAIT_MS = 5 * 60_000;
-const LEASE_POLL_MS = 2_000;
-const STOP_TIMEOUT_MS = 15_000;
-
-const results = [];
-
-class SmokeFailure extends Error {}
-
-function convex(args, env = {}) {
-  return spawnSync("pnpm", ["exec", "convex", ...args], {
-    encoding: "utf8",
-    maxBuffer: 64 * 1024 * 1024,
-    env: { ...process.env, ...env },
+const root = resolve(import.meta.dirname, "..");
+const workspace = mkdtempSync(join(tmpdir(), "models-dev-smoke-"));
+const convexBin = join(root, "node_modules/convex/bin/main.js");
+const childEnv = { ...process.env, CONVEX_AGENT_MODE: "anonymous" };
+for (const key of [
+  "CONVEX_DEPLOYMENT",
+  "CONVEX_DEPLOY_KEY",
+  "CONVEX_SELF_HOSTED_URL",
+  "CONVEX_SELF_HOSTED_ADMIN_KEY",
+  "CONVEX_URL",
+  "CONVEX_SITE_URL",
+])
+  delete childEnv[key];
+let dev;
+let server;
+let client;
+let publicClient;
+let checks = 0;
+let body;
+let etag = '"fixture-1"';
+let fail = false;
+function check(condition, message) {
+  if (!condition) throw new Error(`Smoke: ${message}`);
+  checks++;
+}
+async function freePort() {
+  const socket = netServer();
+  await new Promise((resolvePort, reject) => {
+    socket.once("error", reject);
+    socket.listen(0, "127.0.0.1", resolvePort);
   });
+  const address = socket.address();
+  check(address && typeof address !== "string", "ephemeral port unavailable");
+  await new Promise((resolveClose) => socket.close(resolveClose));
+  return address.port;
 }
-
-function readEnvLocal() {
-  if (!existsSync(ENV_FILE)) return {};
-  const entries = readFileSync(ENV_FILE, "utf8")
-    .split("\n")
-    .map((line) => /^([A-Z0-9_]+)=(.*)$/.exec(line.trim()))
-    .filter((match) => match !== null)
-    .map((match) => [match[1], match[2].replace(/^"|"$/g, "")]);
-  return Object.fromEntries(entries);
+async function waitFor(fn) {
+  const deadline = Date.now() + 120000;
+  while (Date.now() < deadline) {
+    if (await fn()) return;
+    await sleep(100);
+  }
+  throw new Error("Smoke: local backend did not become ready");
 }
-
-function check(name, condition, detail = "") {
-  results.push({ name, ok: Boolean(condition), detail });
-  if (!condition) throw new SmokeFailure(`${name}${detail ? `: ${detail}` : ""}`);
-}
-
-/** The example imports the package by name, which resolves to `dist`. */
-function build() {
-  const result = spawnSync("pnpm", ["build"], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-  if (result.status !== 0)
-    throw new SmokeFailure(`pnpm build failed\n${result.stdout}${result.stderr}`);
-}
-
-/**
- * Starts `convex dev` and resolves once the functions are pushed. A fresh checkout gets an
- * anonymous local deployment, with no login. The dev server stays up for the whole run: stopping
- * the CLI stops the local backend, which would kill the catalog sync that the component's cron
- * starts right after the first push and leave its lease held.
- */
-async function startDevServer() {
-  const anonymous = existsSync(ENV_FILE) && "CONVEX_DEPLOYMENT" in readEnvLocal();
-  const child = spawn(
-    "pnpm",
-    ["exec", "convex", "dev", "--typecheck", "disable", "--tail-logs", "disable"],
+const cli = (...args) =>
+  execFileSync(process.execPath, [convexBin, ...args], {
+    cwd: workspace,
+    env: childEnv,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+async function start() {
+  execFileSync("pnpm", ["build"], { cwd: root, env: childEnv, stdio: "pipe" });
+  const archive = join(workspace, "package.tgz");
+  execFileSync("pnpm", ["pack", "--out", archive], { cwd: root, env: childEnv, stdio: "pipe" });
+  const installed = join(workspace, "node_modules/@operatornest/convex-models-dev");
+  mkdirSync(installed, { recursive: true });
+  execFileSync("tar", ["-xzf", archive, "--strip-components=1", "-C", installed], {
+    env: childEnv,
+    stdio: "pipe",
+  });
+  for (const entry of readdirSync(join(root, "node_modules"))) {
+    if (entry === "@operatornest") continue;
+    symlinkSync(join(root, "node_modules", entry), join(workspace, "node_modules", entry), "dir");
+  }
+  cpSync(join(root, "example"), join(workspace, "example"), { recursive: true });
+  rmSync(join(workspace, "example/convex/example.test.ts"));
+  cpSync(join(root, "convex.json"), join(workspace, "convex.json"));
+  writeFileSync(
+    join(workspace, "package.json"),
+    JSON.stringify({
+      name: "models-dev-smoke-consumer",
+      private: true,
+      type: "module",
+      dependencies: {
+        "@operatornest/convex-models-dev": "file:./package.tgz",
+        ...JSON.parse(readFileSync(join(root, "package.json"), "utf8")).peerDependencies,
+      },
+    }),
+  );
+  writeFileSync(
+    join(workspace, "consumer.ts"),
+    `
+import { ModelsDev, estimateCost } from "@operatornest/convex-models-dev";
+import { register } from "@operatornest/convex-models-dev/test";
+import { components } from "./example/convex/_generated/api.js";
+export const models = new ModelsDev(components.modelsDev);
+export { estimateCost, register };
+`,
+  );
+  writeFileSync(
+    join(workspace, "tsconfig.json"),
+    JSON.stringify({
+      compilerOptions: {
+        strict: true,
+        skipLibCheck: false,
+        noEmit: true,
+        target: "ESNext",
+        lib: ["ES2023", "DOM"],
+        module: "ESNext",
+        moduleResolution: "Bundler",
+        types: [],
+      },
+      include: ["consumer.ts", "example/convex/**/*.ts"],
+      exclude: ["**/*.test.ts"],
+    }),
+  );
+  execFileSync(
+    process.execPath,
+    [join(root, "node_modules/@typescript/native/bin/tsc"), "--noEmit"],
     {
-      env: { ...process.env, ...(anonymous ? {} : { CONVEX_AGENT_MODE: "anonymous" }) },
-      stdio: ["ignore", "pipe", "pipe"],
+      cwd: workspace,
+      env: childEnv,
+      stdio: "pipe",
     },
+  );
+  check(true, "strict tarball consumer typecheck failed");
+  writeFileSync(
+    join(workspace, "vitest.config.mjs"),
+    `
+import { defineConfig } from "vitest/config";
+export default defineConfig({ test: { environment: "edge-runtime",
+  server: { deps: { inline: ["@operatornest/convex-models-dev"] } } } });
+`,
+  );
+  writeFileSync(
+    join(workspace, "consumer.test.ts"),
+    `
+import { register } from "@operatornest/convex-models-dev/test";
+import { convexTest } from "convex-test";
+import { expect, test } from "vitest";
+import { api } from "./example/convex/_generated/api.js";
+import schema from "./example/convex/schema.js";
+const modules = import.meta.glob("./example/convex/**/*.ts");
+test("installed test entrypoint registers component queries", async () => {
+  const t = convexTest(schema, modules);
+  register(t);
+  expect(await t.withIdentity({ subject: "reader" }).query(api.example.syncStatus, {}))
+    .toMatchObject({ state: "never_synced", modelCount: 0 });
+  await expect(t.query(api.example.syncStatus, {})).rejects.toThrow("Not signed in.");
+});
+`,
+  );
+  execFileSync(process.execPath, [join(root, "node_modules/vitest/vitest.mjs"), "run"], {
+    cwd: workspace,
+    env: childEnv,
+    stdio: "pipe",
+  });
+  check(true, "tarball consumer test failed");
+  const fixtureSource = readFileSync(join(root, "src/fixtures/api.fixture.ts"), "utf8");
+  const fixtureJs = ts.transpileModule(fixtureSource, {
+    compilerOptions: { module: ts.ModuleKind.ESNext },
+  }).outputText;
+  const { fixtureCatalog } = await import(
+    `data:text/javascript;base64,${Buffer.from(fixtureJs).toString("base64")}`
+  );
+  const catalog = structuredClone(fixtureCatalog);
+  const template = catalog.openai.models["gpt-5-mini"];
+  for (let i = 0; i < 50; i++)
+    catalog[`fixture-${i}`] = {
+      name: `Fixture ${i}`,
+      models: Object.fromEntries(
+        Array.from({ length: 20 }, (_, j) => [
+          `model-${j}`,
+          { ...template, name: `Fixture model ${j}` },
+        ]),
+      ),
+    };
+  body = JSON.stringify(catalog);
+  const sourcePort = await freePort();
+  server = createServer((request, response) => {
+    if (fail) {
+      response.writeHead(503);
+      response.end("fixture failure");
+      return;
+    }
+    if (request.headers["if-none-match"] === etag) {
+      response.writeHead(304);
+      response.end();
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json", etag });
+    response.end(body);
+  });
+  await new Promise((resolveListen) => server.listen(sourcePort, "127.0.0.1", resolveListen));
+  for (const relative of ["src/component/config.ts", "dist/component/config.js"]) {
+    const configPath = join(installed, relative);
+    const config = readFileSync(configPath, "utf8")
+      .replace("https://models.dev/api.json", `http://127.0.0.1:${sourcePort}/primary`)
+      .replace("https://models.opencode.ai/api.json", `http://127.0.0.1:${sourcePort}/fallback`);
+    writeFileSync(configPath, config);
+  }
+  const cloud = await freePort();
+  const site = await freePort();
+  dev = spawn(
+    process.execPath,
+    [
+      convexBin,
+      "dev",
+      "--typecheck",
+      "enable",
+      "--tail-logs",
+      "disable",
+      "--local-cloud-port",
+      String(cloud),
+      "--local-site-port",
+      String(site),
+    ],
+    { cwd: workspace, env: childEnv, stdio: ["ignore", "pipe", "pipe"] },
   );
   let output = "";
-  child.stdout.on("data", (chunk) => (output += chunk));
-  child.stderr.on("data", (chunk) => (output += chunk));
-  const exited = new Promise((resolve) => child.once("exit", resolve));
-  const deadline = Date.now() + READY_TIMEOUT_MS;
-  while (!output.includes("Convex functions ready")) {
-    if (child.exitCode !== null) throw new SmokeFailure(`convex dev exited early\n${output}`);
-    if (Date.now() > deadline) {
-      child.kill("SIGTERM");
-      throw new SmokeFailure(`convex dev was not ready after ${READY_TIMEOUT_MS} ms\n${output}`);
-    }
-    await sleep(POLL_MS);
-  }
-  return {
-    async stop() {
-      if (child.exitCode !== null) return;
-      child.kill("SIGTERM");
-      const killer = setTimeout(() => child.kill("SIGKILL"), STOP_TIMEOUT_MS);
-      await exited;
-      clearTimeout(killer);
-    },
-  };
-}
-
-function parseResult(name, text) {
-  const trimmed = text.trim();
-  // `convex run` prints nothing for a null result.
-  if (trimmed === "") return null;
-  for (let start = trimmed.length - 1; start >= 0; start--) {
-    // The result is the last JSON value printed, after any function log lines.
-    if (start > 0 && trimmed[start - 1] !== "\n") continue;
-    try {
-      return JSON.parse(trimmed.slice(start));
-    } catch {
-      // Keep scanning upwards until the whole trailing value parses.
-    }
-  }
-  throw new SmokeFailure(`${name} returned unparseable output: ${text}`);
-}
-
-/** Runs an example function and returns `{ ok, value, output }`. */
-function call(name, args = {}) {
-  const result = convex(["run", name, JSON.stringify(args)]);
-  const output = `${result.stdout}${result.stderr}`;
-  if (result.status !== 0) return { ok: false, value: undefined, output };
-  return { ok: true, value: parseResult(name, result.stdout), output };
-}
-
-function run(name, args = {}) {
-  const outcome = call(name, args);
-  if (!outcome.ok) throw new SmokeFailure(`${name} failed\n${outcome.output}`);
-  return outcome.value;
-}
-
-/** Polls until the freshly started backend answers a query. */
-async function waitForBackend() {
-  const deadline = Date.now() + READY_TIMEOUT_MS;
-  for (;;) {
-    const outcome = call("example:syncStatus");
-    if (outcome.ok) return outcome.value;
-    if (Date.now() > deadline) {
-      throw new SmokeFailure(`backend not ready after ${READY_TIMEOUT_MS} ms\n${outcome.output}`);
-    }
-    await sleep(POLL_MS);
-  }
-}
-
-/** Forced sync, waiting out a lease that another run (such as the startup cron tick) still holds. */
-async function syncSettled(args) {
-  const deadline = Date.now() + LEASE_WAIT_MS;
-  for (;;) {
-    const result = run("example:syncNow", args);
-    if (result.status !== "skipped" || result.reason !== "already_running") return result;
-    if (Date.now() > deadline) throw new SmokeFailure("sync lease was never released");
-    console.log("   another run holds the sync lease, waiting");
-    await sleep(LEASE_POLL_MS);
-  }
-}
-
-const blended = (model) => (3 * (model.costInput ?? 0) + (model.costOutput ?? 0)) / 4;
-
-let devServer;
-
-async function main() {
-  console.log("1. build the package and start the example app on the local backend");
-  build();
-  devServer = await startDevServer();
-  const env = readEnvLocal();
-  check(
-    "deployment configured",
-    env.CONVEX_DEPLOYMENT,
-    "CONVEX_DEPLOYMENT missing from .env.local",
-  );
-  const initial = await waitForBackend();
-  check(
-    "backend answers queries",
-    ["never_synced", "ok"].includes(initial.state),
-    JSON.stringify(initial),
-  );
-
-  console.log("2. sync the live models.dev catalog");
-  const started = Date.now();
-  const sync = await syncSettled({ force: true });
-  const wallMs = Date.now() - started;
-  check(
-    "forced sync finished ok or unchanged",
-    ["ok", "not_modified"].includes(sync.status),
-    JSON.stringify(sync),
-  );
-  const status = run("example:syncStatus");
-  check(
-    "sync stayed within the time budget",
-    (sync.durationMs ?? 0) < 120_000,
-    `${sync.durationMs} ms`,
-  );
-  check("state is ok", status.state === "ok", status.state);
-  check(
-    "lease released",
-    status.running === false && status.leaseExpiresAt === undefined,
-    JSON.stringify(status),
-  );
-  check("no error recorded", status.lastError === undefined && status.lastStatus !== "error");
-  check(
-    "catalog is large",
-    status.modelCount > 1000 && status.providerCount > 50,
-    `${status.modelCount} models, ${status.providerCount} providers`,
-  );
-
-  console.log("3. repeat syncs use the interval floor and the conditional fetch");
-  const skipped = run("example:syncNow", {});
-  check(
-    "non-forced repeat is skipped by the interval floor",
-    skipped.status === "skipped" && skipped.reason === "min_interval",
-    JSON.stringify(skipped),
-  );
-  let repeat = await syncSettled({ force: true });
-  for (let i = 0; i < 2 && repeat.status !== "not_modified"; i++) {
-    // The upstream catalog may change between two syncs; the next one must settle.
-    repeat = await syncSettled({ force: true });
-  }
-  check("forced repeat is not_modified", repeat.status === "not_modified", JSON.stringify(repeat));
-
-  console.log("4. read the catalog");
-  const first = run("example:listModels", { cursor: null, numItems: 10 });
-  check(
-    "first page is full and not done",
-    first.page.length === 10 && first.isDone === false,
-    `${first.page.length} rows`,
-  );
-  const second = run("example:listModels", { cursor: first.continueCursor, numItems: 10 });
-  const seen = new Set(first.page.map((m) => `${m.providerId}/${m.modelId}`));
-  check(
-    "second page has rows and does not overlap",
-    second.page.length > 0 && second.page.every((m) => !seen.has(`${m.providerId}/${m.modelId}`)),
-  );
-
-  const pick = first.page.find(
-    (m) => !m.providerId.includes(".") && (m.costInput ?? 0) > 0 && (m.costOutput ?? 0) > 0,
-  );
-  check("page 1 holds a priced model to test with", pick !== undefined);
-  const key = `${pick.providerId}/${pick.modelId}`;
-  const bySlash = run("example:getModel", { key });
-  check(
-    "getModel by provider/model",
-    bySlash?.modelId === pick.modelId && bySlash.providerId === pick.providerId,
-    key,
-  );
-  const byColon = run("example:getModel", { key: `${pick.providerId}:${pick.modelId}` });
-  check("getModel by provider:model", byColon?.modelId === pick.modelId);
-  check(
-    "getModel misses cleanly",
-    run("example:getModel", { key: "no-such-provider/none" }) === null,
-  );
-
-  const cheap = run("example:cheapestWithTools", {});
-  check(
-    "cheapest returns priced models",
-    cheap.length > 0 && cheap.every((m) => m.costInput !== undefined),
-  );
-  check(
-    "cheapest is ordered by blended price",
-    cheap.every((m, i) => i === 0 || blended(cheap[i - 1]) <= blended(m)),
-  );
-
-  console.log("5. price a usage report");
-  const nano = run("example:costOfUsage", {
-    provider: pick.providerId,
-    model: pick.modelId,
-    rawUsage: { inputTokens: 1000, outputTokens: 500 },
+  for (const stream of [dev.stdout, dev.stderr])
+    stream.on("data", (chunk) => {
+      output += chunk.toString();
+      writeFileSync(join(workspace, "dev.log"), output);
+    });
+  await waitFor(() => {
+    if (dev.exitCode !== null) throw new Error("Smoke: local Convex process exited");
+    return output.includes("Convex functions ready");
   });
-  const expected =
-    Math.round(1000 * pick.costInput * 1e3) + Math.round(500 * pick.costOutput * 1e3);
-  check(
-    "costOfUsage equals tokens x price in nano-USD",
-    nano === expected,
-    `${nano} vs ${expected}`,
+  const local = JSON.parse(
+    readFileSync(join(workspace, ".convex/local/default/config.json"), "utf8"),
   );
-  check(
-    "unknown model is priced as null",
-    run("example:costOfUsage", {
-      provider: "no-such-provider",
-      model: "none",
-      rawUsage: { inputTokens: 1 },
-    }) === null,
-  );
-
-  console.log("6. configuration errors carry a code");
-  const rejected = call("example:configureSync", { minModels: -1 });
-  check(
-    "invalid config is rejected with MODELS_DEV_INVALID_CONFIG",
-    !rejected.ok && rejected.output.includes("MODELS_DEV_INVALID_CONFIG"),
-    rejected.output.slice(0, 300),
-  );
-
-  return { sync, wallMs, status, key, nano, first, second, cheap };
+  const url = `http://127.0.0.1:${local.ports.cloud}`;
+  client = new ConvexHttpClient(url, { logger: false });
+  client.setAdminAuth(local.adminKey, {
+    subject: "smoke",
+    issuer: "local",
+    tokenIdentifier: "local|smoke",
+  });
+  publicClient = new ConvexHttpClient(url, { logger: false });
 }
-
-let release = () => {};
-try {
-  release = await acquireLock();
-  const r = await main();
-  console.log(
-    [
-      `SMOKE OK (${results.length} checks)`,
-      `  deployment: ${readEnvLocal().CONVEX_URL ?? "n/a"}`,
-      `  sync: ${r.sync.status}, durationMs=${r.sync.durationMs ?? "n/a"}, wall=${r.wallMs} ms`,
-      `  catalog: ${r.status.modelCount} models, ${r.status.providerCount} providers`,
-      `  model under test: ${r.key}; cheapest tool-calling: ${r.cheap[0].providerId}/${r.cheap[0].modelId}`,
-      `  costOfUsage(1000 in, 500 out): ${r.nano} nano-USD`,
-      `  list: page1=${r.first.page.length}, page2=${r.second.page.length}`,
-    ].join("\n"),
+const query = (name, args = {}) => client.query(anyApi.example[name], args);
+const action = (name, args = {}) => client.action(anyApi.example[name], args);
+function component(name, args) {
+  const result = cli("run", "--component", "modelsDev", name, JSON.stringify(args));
+  return result.trim() ? JSON.parse(result) : null;
+}
+function errorCode(fn) {
+  try {
+    fn();
+    return "accepted";
+  } catch (error) {
+    return /MODELS_DEV_[A-Z_]+/.exec(String(error.stderr))?.[0] ?? "unknown";
+  }
+}
+async function journey() {
+  await client.mutation(anyApi.example.configureSync, { minProviders: 1, minModels: 1 });
+  let synced;
+  await waitFor(async () => {
+    synced = await action("syncNow", { force: true });
+    return synced.reason !== "already_running";
+  });
+  check(["ok", "not_modified"].includes(synced.status), "fixture sync failed");
+  const status = await query("syncStatus");
+  check(
+    status.modelCount === 1021 &&
+      status.providerCount === 55 &&
+      !status.running &&
+      status.errors.length === 0,
+    "sync counts or lease differ",
   );
+  check((await action("syncNow")).reason === "min_interval", "interval floor failed");
+  check(
+    (await action("syncNow", { force: true })).status === "not_modified",
+    "conditional fetch failed",
+  );
+  const first = await query("listModels", { cursor: null, numItems: 10 });
+  const next = await query("listModels", { cursor: first.continueCursor, numItems: 10 });
+  const keys = new Set(first.page.map((row) => JSON.stringify([row.providerId, row.modelId])));
+  check(
+    first.page.length === 10 &&
+      next.page.length === 10 &&
+      next.page.every((row) => !keys.has(JSON.stringify([row.providerId, row.modelId]))),
+    "pagination overlapped",
+  );
+  check(
+    (await query("getModel", { key: "openai/gpt-5.4" })).costInput === 2.5,
+    "model lookup failed",
+  );
+  check(
+    (await query("costOfUsage", {
+      provider: "anthropic.messages",
+      model: "claude-sonnet-4-5",
+      rawUsage: { inputTokens: 1000, outputTokens: 500 },
+    })) === 10500000,
+    "cost differs",
+  );
+  check(
+    await query("costOfUsage", {
+      provider: "openai",
+      model: "gpt-5.4",
+      rawUsage: { inputTokens: 1e308 },
+    }).then(
+      () => false,
+      (error) => error.message.includes("MODELS_DEV_INVALID_ARGUMENT"),
+    ),
+    "unsafe usage accepted",
+  );
+  check((await query("cheapestWithTools")).models.length > 0, "capability query empty");
+  for (const cursor of ["not-json", "{}", "[{}]"])
+    check(
+      errorCode(() => component("models:list", { paginationOpts: { numItems: 1, cursor } })) ===
+        "MODELS_DEV_INVALID_ARGUMENT",
+      "cursor error differs",
+    );
+  const pinned = component("models:list", {
+    includeDeprecated: true,
+    paginationOpts: { numItems: 1, cursor: null, endCursor: "[]" },
+  });
+  check(
+    pinned.pageStatus === "SplitRequired" &&
+      typeof pinned.splitCursor === "string" &&
+      pinned.page.length <= 2,
+    "pinned split metadata missing",
+  );
+  const bytes = component("models:list", {
+    paginationOpts: { numItems: 100, cursor: null, maximumBytesRead: 1 },
+  });
+  check(bytes.page.length <= 1 && bytes.pageStatus === "SplitRequired", "byte budget ignored");
+  check(
+    errorCode(() => component("config:configure", { sourceUrl: "http://example.com" })) ===
+      "MODELS_DEV_INVALID_SOURCE_URL",
+    "source error differs",
+  );
+  check(
+    errorCode(() =>
+      component("config:configure", { sourceUrl: "https://example.com/" + "a".repeat(2048) }),
+    ) === "MODELS_DEV_INVALID_SOURCE_URL",
+    "oversized URL accepted",
+  );
+  const denied = await publicClient.query(anyApi.example.syncStatus, {}).then(
+    () => false,
+    (error) => error.message.includes("Not signed in."),
+  );
+  check(denied, "anonymous public query accepted");
+  for (const [method, name] of [
+    ["mutation", "configureSync"],
+    ["action", "syncNow"],
+  ])
+    check(
+      await publicClient[method](anyApi.example[name], {}).then(
+        () => false,
+        () => true,
+      ),
+      "anonymous maintenance accepted",
+    );
+  const malformed = JSON.parse(body);
+  malformed.openai.models["gpt-5.4"].name = "x".repeat(499) + "😀";
+  body = JSON.stringify(malformed);
+  etag = '"fixture-2"';
+  check((await action("syncNow", { force: true })).status === "ok", "Unicode catalog rejected");
+  check(
+    (await query("getModel", { key: "openai/gpt-5.4" })).name.endsWith("😀"),
+    "Unicode string changed",
+  );
+  for (const count of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1])
+    check(
+      errorCode(() =>
+        component("models:estimate", {
+          provider: "openai",
+          model: "gpt-5.4",
+          usage: { inputTokens: count },
+        }),
+      ) === "MODELS_DEV_INVALID_ARGUMENT",
+      "invalid token count accepted",
+    );
+  check(
+    component("models:estimate", {
+      provider: "openai",
+      model: "gpt-5.4",
+      usage: { inputTokens: 10 },
+      mode: "absent",
+    }).known === false,
+    "unpriced mode accepted",
+  );
+  const cheapest = component("models:cheapest", {
+    providerIds: ["openai", "anthropic"],
+    limit: 20,
+  });
+  check(
+    cheapest.isComplete &&
+      cheapest.models.length > 0 &&
+      cheapest.models.every((row) => ["openai", "anthropic"].includes(row.providerId)),
+    "provider cost ranges differ",
+  );
+  const stored = await query("getModel", { key: "openai/gpt-5.4" });
+  const oversized = JSON.parse(body);
+  oversized.openai.models["gpt-5.4"].family = "😀".repeat(257);
+  body = JSON.stringify(oversized);
+  etag = '"fixture-index-bound"';
+  const skipped = await action("syncNow", { force: true });
+  check(
+    skipped.status === "ok" &&
+      skipped.skippedModels === 1 &&
+      JSON.stringify(await query("getModel", { key: "openai/gpt-5.4" })) === JSON.stringify(stored),
+    "oversized index string changed stored row",
+  );
+  const provider = JSON.parse(body);
+  provider.openai = null;
+  body = JSON.stringify(provider);
+  etag = '"fixture-invalid-provider"';
+  check(
+    (await action("syncNow", { force: true })).status === "ok" &&
+      JSON.stringify(await query("getModel", { key: "openai/gpt-5.4" })) === JSON.stringify(stored),
+    "malformed provider blocked sync or removed stored row",
+  );
+  const savedBody = body;
+  body = body.padEnd(16 * 1024 * 1024 + 1, " ");
+  etag = '"fixture-large"';
+  const tooLarge = await action("syncNow", { force: true });
+  check(
+    tooLarge.status === "error" &&
+      tooLarge.errors.length === 2 &&
+      tooLarge.errors.every((error) => error.code === "MODELS_DEV_CATALOG_TOO_LARGE"),
+    "oversized catalog accepted",
+  );
+  body = savedBody;
+  fail = true;
+  const failed = await action("syncNow", { force: true });
+  check(
+    failed.status === "error" &&
+      failed.error.code === "MODELS_DEV_FETCH_FAILED" &&
+      failed.error.providerStatus === 503 &&
+      failed.error.message === "The catalog request failed." &&
+      failed.errors.length === 2 &&
+      failed.errors[0].source === "primary" &&
+      failed.errors[1].source === "fallback",
+    "upstream error differs",
+  );
+  check(
+    JSON.stringify((await query("syncStatus")).errors) === JSON.stringify(failed.errors),
+    "stored error differs",
+  );
+}
+const release = await acquireLock();
+try {
+  await start();
+  await journey();
+  console.log(`SMOKE OK: ${checks} checks on an isolated local fixture deployment`);
 } catch (error) {
-  for (const { name, ok } of results) console.error(`  ${ok ? "ok  " : "FAIL"} ${name}`);
-  console.error(`SMOKE FAILED: ${error instanceof Error ? error.message : String(error)}`);
+  console.error(
+    error instanceof Error && error.message.startsWith("Smoke:")
+      ? error.message
+      : "Smoke: local journey failed",
+  );
   process.exitCode = 1;
 } finally {
-  await devServer?.stop();
+  if (dev && dev.exitCode === null) {
+    dev.kill("SIGTERM");
+    await Promise.race([new Promise((resolveExit) => dev.once("exit", resolveExit)), sleep(10000)]);
+    if (dev.exitCode === null) dev.kill("SIGKILL");
+  }
+  if (server) await new Promise((resolveClose) => server.close(resolveClose));
+  rmSync(workspace, { recursive: true, force: true });
   release();
 }

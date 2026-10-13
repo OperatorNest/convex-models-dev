@@ -104,7 +104,7 @@ describe("estimateCost matrix (spec 6.4)", () => {
     const e = known(gpt54, { inputTokens: 272_001, outputTokens: 1000 }, { mode: "fast" });
     expect(e.mode).toBe("fast");
     expect(e.tier).toBe(272_000);
-    // fast: 5 / 30; base tier: 5 / 22.5 -> output stays 30, never lowered to 22.5.
+
     expect(e.nanoUsd).toBe(272_001 * 5000 + 1000 * 30_000);
     expect(e.assumptions).toEqual(["mode_without_tiers: used max(mode, base tier) per field"]);
   });
@@ -136,12 +136,11 @@ describe("estimateCost matrix (spec 6.4)", () => {
     expect(e.tier).toBe(100);
   });
 
-  test("unknown mode is ignored; mode without cost keeps the base table", () => {
-    const e = known(gpt54, { inputTokens: 1000 }, { mode: "nope" });
-    expect(e.mode).toBeNull();
-    expect(e.nanoUsd).toBe(1000 * 2500);
-    const pro = fixtureModel("openai", "gpt-5.6");
-    expect(known(pro, { inputTokens: 1000 }, { mode: "pro" }).mode).toBeNull();
+  test("unpriced requested modes return unknown", () => {
+    expect(estimateCost(gpt54, { inputTokens: 1000 }, { mode: "nope" })).toEqual({ known: false });
+    expect(
+      estimateCost(fixtureModel("openai", "gpt-5.6"), { inputTokens: 1000 }, { mode: "pro" }),
+    ).toEqual({ known: false });
   });
 
   test("a tier missing a field falls back to the base value", () => {
@@ -254,10 +253,10 @@ describe("usage normalization", () => {
     expect(e.nanoUsd).toBe(300 * 2000 + 100 * 4000);
   });
 
-  test("negative, NaN and fractional counts are clamped to whole non-negative numbers", () => {
-    const e = known(model, { inputTokens: -5, outputTokens: Number.NaN, cacheReadTokens: 10.9 });
-    expect(e.nanoUsd).toBe(10 * 500);
-    expect(known(model, { inputTokens: 10.9 }).nanoUsd).toBe(10 * 1000);
+  test("invalid token counts throw a fixed argument error", () => {
+    for (const count of [-5, NaN, Infinity, -Infinity, 10.9, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => estimateCost(model, { inputTokens: count })).toThrow();
+    }
   });
 
   test("cache tokens never push uncached input below zero", () => {

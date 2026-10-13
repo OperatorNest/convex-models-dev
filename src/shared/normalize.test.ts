@@ -101,7 +101,7 @@ describe("providers and catalog shape", () => {
     expect(
       normalizeProvider(
         "anthropic",
-        { name: "Anthropic", npm: "@ai-sdk/anthropic", env: ["K", 3], doc: "https://d" },
+        { name: "Anthropic", npm: "@ai-sdk/anthropic", env: ["K"], doc: "https://d" },
         4,
       ),
     ).toEqual({
@@ -114,6 +114,7 @@ describe("providers and catalog shape", () => {
     });
     expect(normalizeProvider("x", {}, 0)?.name).toBe("x");
     expect(normalizeProvider("x", null, 0)).toBeNull();
+    expect(normalizeProvider("x", { env: ["K", 3] }, 0)).toBeNull();
   });
 
   test("inspectCatalog counts providers and models and rejects non-objects", () => {
@@ -128,9 +129,11 @@ describe("providers and catalog shape", () => {
       skippedModels: 1,
     });
     for (const broken of [3, null, {}, { models: [] }, { models: "x" }]) {
-      expect(() => inspectCatalog({ a: { models: {} }, b: broken })).toThrow(
-        /has no models object/,
-      );
+      expect(inspectCatalog({ a: { models: {} }, b: broken })).toEqual({
+        providerCount: 0,
+        modelCount: 0,
+        skippedModels: 0,
+      });
     }
     expect(() => inspectCatalog([])).toThrow();
     expect(() => inspectCatalog(null)).toThrow();

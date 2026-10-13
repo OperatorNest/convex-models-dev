@@ -7,8 +7,11 @@ import {
 import { paginationResultValidator } from "convex/server";
 import { v, type Infer } from "convex/values";
 import { components } from "./_generated/api.js";
-import { action, mutation, query } from "./_generated/server.js";
+import { internalAction, internalMutation, query, type QueryCtx } from "./_generated/server.js";
 
+async function requireIdentity(ctx: Pick<QueryCtx, "auth">): Promise<void> {
+  if (!(await ctx.auth.getUserIdentity())) throw new Error("Not signed in.");
+}
 const modelsDev = new ModelsDev(components.modelsDev);
 
 const modelSummary = v.object({
@@ -35,16 +38,19 @@ function summarize(m: ModelSummary): ModelSummary {
 export const syncStatus = query({
   args: {},
   returns: syncStatusValidator,
-  handler: (ctx) => modelsDev.sync.status(ctx),
+  handler: async (ctx) => {
+    await requireIdentity(ctx);
+    return modelsDev.sync.status(ctx);
+  },
 });
 
-export const syncNow = action({
+export const syncNow = internalAction({
   args: { force: v.optional(v.boolean()) },
   returns: syncSummaryValidator,
   handler: (ctx, { force }) => modelsDev.sync.now(ctx, force === undefined ? {} : { force }),
 });
 
-export const configureSync = mutation({
+export const configureSync = internalMutation({
   args: { minModels: v.optional(v.number()), minProviders: v.optional(v.number()) },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -57,6 +63,7 @@ export const getModel = query({
   args: { key: v.string() },
   returns: v.union(modelSummary, v.null()),
   handler: async (ctx, { key }) => {
+    await requireIdentity(ctx);
     const model = await modelsDev.models.getByKey(ctx, { key });
     return model ? summarize(model) : null;
   },
@@ -66,6 +73,7 @@ export const listModels = query({
   args: { cursor: v.union(v.string(), v.null()), numItems: v.number() },
   returns: paginationResultValidator(modelSummary),
   handler: async (ctx, { cursor, numItems }) => {
+    await requireIdentity(ctx);
     const result = await modelsDev.models.list(ctx, { paginationOpts: { cursor, numItems } });
     return { ...result, page: result.page.map(summarize) };
   },
@@ -73,28 +81,29 @@ export const listModels = query({
 
 export const cheapestWithTools = query({
   args: { minContext: v.optional(v.number()) },
-  returns: v.array(modelSummary),
+  returns: v.object({ models: v.array(modelSummary), isComplete: v.boolean() }),
   handler: async (ctx, { minContext }) => {
-    const rows = await modelsDev.models.cheapest(ctx, {
+    await requireIdentity(ctx);
+    const result = await modelsDev.models.cheapest(ctx, {
       toolCall: true,
       excludeFree: true,
       ...(minContext !== undefined && { minContext }),
     });
-    return rows.map(summarize);
+    return { models: result.models.map(summarize), isComplete: result.isComplete };
   },
 });
 
-/** Cost of an `@convex-dev/agent` usage report, for use inside a `usageHandler`. */
 export const costOfUsage = query({
   args: {
     provider: v.string(),
     model: v.string(),
-    // Passthrough of the AI SDK usage and provider metadata objects, whose shape varies by SDK version.
+
     rawUsage: v.any(),
     rawProviderMetadata: v.optional(v.any()),
   },
   returns: v.union(v.null(), v.number()),
   handler: async (ctx, args) => {
+    await requireIdentity(ctx);
     const estimate = await modelsDev.models.estimateCost(ctx, {
       provider: args.provider,
       model: args.model,

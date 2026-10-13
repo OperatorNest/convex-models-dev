@@ -9,18 +9,15 @@ const modules: ReturnType<ImportMetaGlob> = import.meta.glob([
   "!./component/**/*.test.ts",
 ]);
 
-/** A convex-test instance with the component's own schema as the root. */
 export function componentTest() {
   return convexTest(schema, modules);
 }
 export type ComponentTest = ReturnType<typeof componentTest>;
 
-/** The fixture is much smaller than the real catalog, so lower the abort guard. */
 export async function relaxGuards(t: ComponentTest) {
   await t.mutation(api.config.configure, { minProviders: 1, minModels: 1 });
 }
 
-/** Narrows a nullable value or fails the test. */
 export function requireValue<Value>(value: Value | null | undefined): Value {
   if (value === null || value === undefined) throw new Error("expected a value");
   return value;
@@ -28,7 +25,6 @@ export function requireValue<Value>(value: Value | null | undefined): Value {
 
 export type FetchCall = { url: string; headers: Record<string, string> };
 
-/** Stubs global fetch with a handler and records each call. Never touches the network. */
 export function stubFetch(handler: (call: FetchCall) => Response | Promise<Response>) {
   const calls: FetchCall[] = [];
   vi.stubGlobal(
@@ -47,7 +43,6 @@ export function stubFetch(handler: (call: FetchCall) => Response | Promise<Respo
   return calls;
 }
 
-/** A fake models.dev: serves `server.body` with an ETag and honours If-None-Match. */
 export function catalogServer(initial: { body: string; etag?: string }) {
   const server = {
     body: initial.body,

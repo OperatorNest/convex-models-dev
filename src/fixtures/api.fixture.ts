@@ -1,4 +1,3 @@
-// Real slice of https://models.dev/api.json (MIT), used only by tests.
 import type { Catalog } from "./index.js";
 
 export const fixtureCatalog: Catalog = {

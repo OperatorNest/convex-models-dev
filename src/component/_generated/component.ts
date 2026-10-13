@@ -77,85 +77,89 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           structuredOutput?: boolean;
           toolCall?: boolean;
         },
-        Array<{
-          _creationTime: number;
-          _id: string;
-          attachment: boolean;
-          canonicalModelId?: string;
-          contentHash: string;
-          contextLimit: number;
-          costBlended?: number;
-          costCacheRead?: number;
-          costCacheWrite?: number;
-          costInput?: number;
-          costInputAudio?: number;
-          costOutput?: number;
-          costOutputAudio?: number;
-          costReasoning?: number;
-          description?: string;
-          family?: string;
-          firstSeenAt: number;
-          hasCost: boolean;
-          inputLimit?: number;
-          inputMask: number;
-          interleaved?: true | { field: string };
-          knowledge?: string;
-          lastUpdated: string;
-          modelId: string;
-          modes?: Record<
-            string,
-            {
-              cost?: {
-                cacheRead?: number;
-                cacheWrite?: number;
-                input?: number;
-                inputAudio?: number;
-                output?: number;
-                outputAudio?: number;
-                reasoning?: number;
-              };
-              tiers?: Array<{
-                cacheRead?: number;
-                cacheWrite?: number;
-                input?: number;
-                inputAudio?: number;
-                output?: number;
-                outputAudio?: number;
-                reasoning?: number;
-                size: number;
-              }>;
-            }
-          >;
-          name: string;
-          openWeights: boolean;
-          outputLimit: number;
-          outputMask: number;
-          providerId: string;
-          providerOverride?: { api?: string; npm?: string; shape?: string };
-          reasoning: boolean;
-          reasoningOptions?: Array<
-            | { type: "toggle" }
-            | { type: "effort"; values: Array<null | string> }
-            | { max?: number; min?: number; type: "budget_tokens" }
-          >;
-          releaseDate: string;
-          searchText: string;
-          status?: string;
-          structuredOutput?: boolean;
-          temperature?: boolean;
-          tiers?: Array<{
-            cacheRead?: number;
-            cacheWrite?: number;
-            input?: number;
-            inputAudio?: number;
-            output?: number;
-            outputAudio?: number;
-            reasoning?: number;
-            size: number;
+        {
+          isComplete: boolean;
+          models: Array<{
+            _creationTime: number;
+            _id: string;
+            attachment: boolean;
+            canonicalModelId?: string;
+            contentHash: string;
+            contextLimit: number;
+            costBlended?: number;
+            costCacheRead?: number;
+            costCacheWrite?: number;
+            costInput?: number;
+            costInputAudio?: number;
+            costOrder: number;
+            costOutput?: number;
+            costOutputAudio?: number;
+            costReasoning?: number;
+            description?: string;
+            family?: string;
+            firstSeenAt: number;
+            hasCost: boolean;
+            inputLimit?: number;
+            inputMask: number;
+            interleaved?: true | { field: string };
+            knowledge?: string;
+            lastUpdated: string;
+            modelId: string;
+            modes?: Record<
+              string,
+              {
+                cost?: {
+                  cacheRead?: number;
+                  cacheWrite?: number;
+                  input?: number;
+                  inputAudio?: number;
+                  output?: number;
+                  outputAudio?: number;
+                  reasoning?: number;
+                };
+                tiers?: Array<{
+                  cacheRead?: number;
+                  cacheWrite?: number;
+                  input?: number;
+                  inputAudio?: number;
+                  output?: number;
+                  outputAudio?: number;
+                  reasoning?: number;
+                  size: number;
+                }>;
+              }
+            >;
+            name: string;
+            openWeights: boolean;
+            outputLimit: number;
+            outputMask: number;
+            providerId: string;
+            providerOverride?: { api?: string; npm?: string; shape?: string };
+            reasoning: boolean;
+            reasoningOptions?: Array<
+              | { type: "toggle" }
+              | { type: "effort"; values: Array<null | string> }
+              | { max?: number; min?: number; type: "budget_tokens" }
+            >;
+            releaseDate: string;
+            searchText: string;
+            status?: string;
+            structuredOutput?: boolean;
+            temperature?: boolean;
+            tiers?: Array<{
+              cacheRead?: number;
+              cacheWrite?: number;
+              input?: number;
+              inputAudio?: number;
+              output?: number;
+              outputAudio?: number;
+              reasoning?: number;
+              size: number;
+            }>;
+            toolCall: boolean;
+            updatedAt: number;
           }>;
-          toolCall: boolean;
-          updatedAt: number;
-        }>,
+        },
         Name
       >;
       equivalents: FunctionReference<
@@ -174,6 +178,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           costCacheWrite?: number;
           costInput?: number;
           costInputAudio?: number;
+          costOrder: number;
           costOutput?: number;
           costOutputAudio?: number;
           costReasoning?: number;
@@ -306,6 +311,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           costCacheWrite?: number;
           costInput?: number;
           costInputAudio?: number;
+          costOrder: number;
           costOutput?: number;
           costOutputAudio?: number;
           costReasoning?: number;
@@ -391,6 +397,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           costCacheWrite?: number;
           costInput?: number;
           costInputAudio?: number;
+          costOrder: number;
           costOutput?: number;
           costOutputAudio?: number;
           costReasoning?: number;
@@ -501,6 +508,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             costCacheWrite?: number;
             costInput?: number;
             costInputAudio?: number;
+            costOrder: number;
             costOutput?: number;
             costOutputAudio?: number;
             costReasoning?: number;
@@ -689,6 +697,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           costCacheWrite?: number;
           costInput?: number;
           costInputAudio?: number;
+          costOrder: number;
           costOutput?: number;
           costOutputAudio?: number;
           costReasoning?: number;
@@ -774,6 +783,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           costCacheWrite?: number;
           costInput?: number;
           costInputAudio?: number;
+          costOrder: number;
           costOutput?: number;
           costOutputAudio?: number;
           costReasoning?: number;
@@ -892,8 +902,22 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         {
           added: number;
           durationMs: number;
+          errors: Array<{
+            code:
+              | "MODELS_DEV_INVALID_CONFIG"
+              | "MODELS_DEV_INVALID_SOURCE_URL"
+              | "MODELS_DEV_INVALID_ARGUMENT"
+              | "MODELS_DEV_INVALID_CATALOG"
+              | "MODELS_DEV_CATALOG_TOO_SMALL"
+              | "MODELS_DEV_CATALOG_TOO_LARGE"
+              | "MODELS_DEV_FETCH_FAILED"
+              | "MODELS_DEV_SYNC_FAILED"
+              | "MODELS_DEV_LEASE_LOST";
+            message: string;
+            providerStatus?: number;
+            source: "primary" | "fallback";
+          }>;
           lastCheckedAt?: number;
-          lastError?: string;
           lastStatus?: "ok" | "not_modified" | "partial" | "error";
           lastSyncedAt?: number;
           leaseExpiresAt?: number;
@@ -917,6 +941,35 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         {
           added?: number;
           durationMs?: number;
+          error?: {
+            code:
+              | "MODELS_DEV_INVALID_CONFIG"
+              | "MODELS_DEV_INVALID_SOURCE_URL"
+              | "MODELS_DEV_INVALID_ARGUMENT"
+              | "MODELS_DEV_INVALID_CATALOG"
+              | "MODELS_DEV_CATALOG_TOO_SMALL"
+              | "MODELS_DEV_CATALOG_TOO_LARGE"
+              | "MODELS_DEV_FETCH_FAILED"
+              | "MODELS_DEV_SYNC_FAILED"
+              | "MODELS_DEV_LEASE_LOST";
+            message: string;
+            providerStatus?: number;
+          };
+          errors: Array<{
+            code:
+              | "MODELS_DEV_INVALID_CONFIG"
+              | "MODELS_DEV_INVALID_SOURCE_URL"
+              | "MODELS_DEV_INVALID_ARGUMENT"
+              | "MODELS_DEV_INVALID_CATALOG"
+              | "MODELS_DEV_CATALOG_TOO_SMALL"
+              | "MODELS_DEV_CATALOG_TOO_LARGE"
+              | "MODELS_DEV_FETCH_FAILED"
+              | "MODELS_DEV_SYNC_FAILED"
+              | "MODELS_DEV_LEASE_LOST";
+            message: string;
+            providerStatus?: number;
+            source: "primary" | "fallback";
+          }>;
           modelCount?: number;
           priceChanges?: number;
           providerCount?: number;

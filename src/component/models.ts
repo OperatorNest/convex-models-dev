@@ -4,7 +4,9 @@ import { v } from "convex/values";
 import type { Doc } from "./_generated/dataModel.js";
 import { query, type QueryCtx } from "./_generated/server.js";
 import schema from "./schema.js";
-import { estimateCost } from "../shared/cost.js";
+import { boundedLimit, boundedPage, finiteBounds } from "../shared/bounds.js";
+import { modelsDevError } from "../shared/errors.js";
+import { estimateCost, validateUsage } from "../shared/cost.js";
 import { modalityMask } from "../shared/normalize.js";
 import { providerCandidates, splitModelKey } from "../shared/resolve.js";
 import { costEstimateValidator, usageValidator } from "../shared/validators.js";
@@ -13,15 +15,15 @@ const modelDoc = schema.doc("models");
 const modalityList = v.array(v.string());
 const MODALITY_NAMES = new Set(["text", "audio", "image", "video", "pdf"]);
 const CHEAPEST_MAX_SCAN = 4000;
-/** Most provider-prefix candidates `getByKey` will look up for one key. */
+
 const MAX_KEY_PREFIXES = 8;
-/** Most rows one `list` call reads, whatever `maximumRowsRead` asks for. */
-const LIST_MAX_ROWS_READ = 4000;
 
 function findModel(ctx: QueryCtx, providerId: string, modelId: string) {
   return ctx.db
     .query("models")
-    .withIndex("by_provider_model", (q) => q.eq("providerId", providerId).eq("modelId", modelId))
+    .withIndex("by_providerId_and_modelId", (q) =>
+      q.eq("providerId", providerId).eq("modelId", modelId),
+    )
     .first();
 }
 
@@ -34,7 +36,6 @@ async function providerExists(ctx: QueryCtx, providerId: string) {
 }
 
 async function findByKey(ctx: QueryCtx, key: string) {
-  // Check each possible provider prefix against the table, then split at the first known one.
   const prefixes = new Set<string>();
   for (let i = 0; i < key.length && prefixes.size < MAX_KEY_PREFIXES; i++) {
     if (i > 0 && (key[i] === "/" || key[i] === ":")) prefixes.add(key.slice(0, i));
@@ -82,9 +83,9 @@ export const resolve = query({
 });
 
 function masks(names: string[] | undefined): number[] {
-  return (names ?? [])
-    .filter((name) => MODALITY_NAMES.has(name))
-    .map((name) => modalityMask([name]));
+  if (names?.some((name) => !MODALITY_NAMES.has(name)))
+    throw modelsDevError("MODELS_DEV_INVALID_ARGUMENT");
+  return (names ?? []).map((name) => modalityMask([name]));
 }
 
 export const list = query({
@@ -106,43 +107,45 @@ export const list = query({
   },
   returns: paginationResultValidator(modelDoc),
   handler: async (ctx, args) => {
+    finiteBounds(args.minContext, args.maxCostInput);
+    const pagination = boundedPage(args.paginationOpts);
     const order = args.order ?? "release";
     const { providerId, family, minContext } = args;
     const table = paginator(ctx.db, schema).query("models");
-    // Every branch keeps the requested order: release and context newest/largest
-    // first, cost cheapest first. Other predicates are filtered during the scan.
+
     let indexed;
     if (order === "release") {
       indexed =
         providerId !== undefined
-          ? table.withIndex("by_provider_release", (q) => q.eq("providerId", providerId))
+          ? table.withIndex("by_providerId_and_releaseDate", (q) => q.eq("providerId", providerId))
           : family !== undefined
-            ? table.withIndex("by_family_release", (q) => q.eq("family", family))
-            : table.withIndex("by_release");
+            ? table.withIndex("by_family_and_releaseDate", (q) => q.eq("family", family))
+            : table.withIndex("by_releaseDate");
       indexed = indexed.order("desc");
     } else if (order === "context") {
       const floor = minContext ?? 0;
       indexed = (
         providerId !== undefined
-          ? table.withIndex("by_provider_context", (q) =>
+          ? table.withIndex("by_providerId_and_contextLimit", (q) =>
               q.eq("providerId", providerId).gte("contextLimit", floor),
             )
           : family !== undefined
-            ? table.withIndex("by_family_context", (q) =>
+            ? table.withIndex("by_family_and_contextLimit", (q) =>
                 q.eq("family", family).gte("contextLimit", floor),
               )
-            : table.withIndex("by_context", (q) => q.gte("contextLimit", floor))
+            : table.withIndex("by_contextLimit", (q) => q.gte("contextLimit", floor))
       ).order("desc");
     } else {
-      // gte 0 leaves out models with no price.
       indexed =
         providerId !== undefined
-          ? table.withIndex("by_provider_cost", (q) =>
+          ? table.withIndex("by_providerId_and_costBlended", (q) =>
               q.eq("providerId", providerId).gte("costBlended", 0),
             )
           : family !== undefined
-            ? table.withIndex("by_family_cost", (q) => q.eq("family", family).gte("costBlended", 0))
-            : table.withIndex("by_cost_blended", (q) => q.gte("costBlended", 0));
+            ? table.withIndex("by_family_and_costBlended", (q) =>
+                q.eq("family", family).gte("costBlended", 0),
+              )
+            : table.withIndex("by_costBlended", (q) => q.gte("costBlended", 0));
     }
 
     const inputBits = masks(args.inputModalities);
@@ -163,43 +166,7 @@ export const list = query({
       inputBits.every((bit) => (m.inputMask & bit) === bit) &&
       outputBits.every((bit) => (m.outputMask & bit) === bit);
 
-    // `paginator` has no `.filter()`, so predicates run on each fetched batch. The batch
-    // size is the number of rows still needed, so a batch never overshoots and the
-    // returned cursor is exact. Sparse filters may return a short page.
-    const wanted = Math.max(1, Math.min(Math.floor(args.paginationOpts.numItems), 100));
-    const maxRows = Math.max(
-      1,
-      Math.min(
-        Math.floor(args.paginationOpts.maximumRowsRead ?? LIST_MAX_ROWS_READ),
-        LIST_MAX_ROWS_READ,
-      ),
-    );
-    // A pinned page (reactive pagination) ends at `endCursor`, so no gap or overlap appears
-    // when rows change between reads. Otherwise the page ends after `wanted` matches.
-    const endCursor = args.paginationOpts.endCursor ?? undefined;
-    const page: Doc<"models">[] = [];
-    let cursor = args.paginationOpts.cursor;
-    let isDone = false;
-    let scanned = 0;
-    while (
-      !isDone &&
-      scanned < maxRows &&
-      (endCursor !== undefined ? cursor !== endCursor : page.length < wanted)
-    ) {
-      const allowance = maxRows - scanned;
-      // Batches depend on the previous cursor, so they run in order.
-      const batch = await indexed.paginate({
-        cursor,
-        numItems: Math.max(1, Math.min(wanted - page.length, allowance)),
-        maximumRowsRead: allowance,
-        ...(endCursor !== undefined && { endCursor }),
-      });
-      scanned += batch.page.length;
-      for (const m of batch.page) if (passes(m)) page.push(m);
-      cursor = batch.continueCursor;
-      isDone = batch.isDone;
-    }
-    return { page, isDone, continueCursor: cursor ?? "" };
+    return indexed.filterWith(async (m) => passes(m)).paginate(pagination);
   },
 });
 
@@ -212,6 +179,7 @@ export const search = query({
   },
   returns: v.array(modelDoc),
   handler: async (ctx, { query: text, providerId, family, limit }) => {
+    const count = boundedLimit(limit, 10, 50);
     const term = text.trim().toLowerCase();
     if (!term) return [];
     return ctx.db
@@ -222,7 +190,7 @@ export const search = query({
         if (family !== undefined) builder = builder.eq("family", family);
         return builder;
       })
-      .take(Math.max(1, Math.min(Math.floor(limit ?? 10), 50)));
+      .take(count);
   },
 });
 
@@ -240,9 +208,10 @@ export const cheapest = query({
     distinctCanonical: v.optional(v.boolean()),
     limit: v.optional(v.number()),
   },
-  returns: v.array(modelDoc),
+  returns: v.object({ models: v.array(modelDoc), isComplete: v.boolean() }),
   handler: async (ctx, args) => {
-    const limit = Math.max(1, Math.min(Math.floor(args.limit ?? 5), 20));
+    finiteBounds(args.minContext, args.minOutput);
+    const limit = boundedLimit(args.limit, 5, 20);
     const excludeDeprecated = args.excludeDeprecated ?? true;
     const required = masks(args.inputModalities).reduce((acc, bit) => acc | bit, 0);
     const providers = args.providerIds ? new Set(args.providerIds) : undefined;
@@ -260,21 +229,63 @@ export const cheapest = query({
     const results: Doc<"models">[] = [];
     const canonical = new Set<string>();
     let scanned = 0;
-    // Lazily streams `by_cost_blended` in order, so any run of ties is walked through.
-    for await (const m of ctx.db
-      .query("models")
-      .withIndex("by_cost_blended", (q) => q.gte("costBlended", 0))) {
-      if (++scanned > CHEAPEST_MAX_SCAN) break;
-      if (!matches(m)) continue;
-      if (args.distinctCanonical) {
-        const key = m.canonicalModelId ?? `${m.providerId}/${m.modelId}`;
-        if (canonical.has(key)) continue;
-        canonical.add(key);
+
+    const ordered = providers
+      ? [...providers].map((providerId) =>
+          ctx.db
+            .query("models")
+            .withIndex("by_providerId_and_costBlended", (q) =>
+              q.eq("providerId", providerId).gte("costBlended", 0),
+            ),
+        )
+      : [ctx.db.query("models").withIndex("by_costBlended", (q) => q.gte("costBlended", 0))];
+    const streams = ordered.map((range) => range[Symbol.asyncIterator]());
+    const heads: (Doc<"models"> | undefined)[] = [];
+    let bounded = false;
+    const advance = async (index: number) => {
+      if (scanned >= CHEAPEST_MAX_SCAN) {
+        heads[index] = undefined;
+        return false;
       }
-      results.push(m);
-      if (results.length >= limit) break;
+      const next = await streams[index]?.next();
+      heads[index] = next && !next.done ? next.value : undefined;
+      if (heads[index]) scanned++;
+      return true;
+    };
+    try {
+      for (let i = 0; i < streams.length; i++) {
+        bounded = !(await advance(i));
+        if (bounded) break;
+      }
+      while (!bounded && results.length < limit) {
+        let selected = -1;
+        for (let i = 0; i < heads.length; i++) {
+          const candidate = heads[i];
+          const current = heads[selected];
+          if (
+            candidate &&
+            (!current ||
+              (candidate.costBlended ?? 0) < (current.costBlended ?? 0) ||
+              (candidate.costBlended === current.costBlended &&
+                candidate._creationTime < current._creationTime))
+          )
+            selected = i;
+        }
+        const m = heads[selected];
+        if (!m) break;
+        if (matches(m)) {
+          const key = m.canonicalModelId ?? JSON.stringify([m.providerId, m.modelId]);
+          if (!args.distinctCanonical || !canonical.has(key)) {
+            canonical.add(key);
+            results.push(m);
+          }
+        }
+        if (results.length < limit) bounded = !(await advance(selected));
+      }
+    } finally {
+      for (const stream of streams) await stream.return?.();
     }
-    return results;
+    return { models: results, isComplete: !bounded || results.length >= limit };
   },
 });
 
@@ -282,14 +293,13 @@ export const equivalents = query({
   args: { canonicalModelId: v.string(), limit: v.optional(v.number()) },
   returns: v.array(modelDoc),
   handler: async (ctx, { canonicalModelId, limit }) => {
-    const rows = await ctx.db
+    return ctx.db
       .query("models")
-      .withIndex("by_canonical", (q) => q.eq("canonicalModelId", canonicalModelId))
-      .take(Math.max(1, Math.min(Math.floor(limit ?? 200), 200)));
-    return rows.toSorted(
-      (a, b) =>
-        (a.costBlended ?? Number.POSITIVE_INFINITY) - (b.costBlended ?? Number.POSITIVE_INFINITY),
-    );
+      .withIndex("by_canonicalModelId_and_hasCost_and_costOrder", (q) =>
+        q.eq("canonicalModelId", canonicalModelId),
+      )
+      .order("desc")
+      .take(boundedLimit(limit, 200, 200));
   },
 });
 
@@ -299,9 +309,11 @@ export const priceHistory = query({
   handler: (ctx, { providerId, modelId, limit }) =>
     ctx.db
       .query("priceChanges")
-      .withIndex("by_model_at", (q) => q.eq("providerId", providerId).eq("modelId", modelId))
+      .withIndex("by_providerId_and_modelId_and_at", (q) =>
+        q.eq("providerId", providerId).eq("modelId", modelId),
+      )
       .order("desc")
-      .take(Math.max(1, Math.min(Math.floor(limit ?? 50), 200))),
+      .take(boundedLimit(limit, 50, 200)),
 });
 
 export const estimate = query({
@@ -315,6 +327,7 @@ export const estimate = query({
   },
   returns: costEstimateValidator,
   handler: async (ctx, args) => {
+    validateUsage(args.usage);
     const row = await resolveRow(ctx, args.provider, args.model, args.aliases);
     if (!row) return { known: false as const };
     return estimateCost(row, args.usage, {

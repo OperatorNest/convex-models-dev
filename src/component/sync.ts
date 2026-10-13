@@ -12,6 +12,7 @@ import {
   type MutationCtx,
 } from "./_generated/server.js";
 import { effectiveConfigValidator, loadConfig } from "./config.js";
+import { boundedPage } from "../shared/bounds.js";
 import { canonicalJson } from "../shared/hash.js";
 import { pricingOf } from "../shared/normalize.js";
 import {
@@ -20,6 +21,7 @@ import {
   providerInputValidator,
   syncCountsFields,
   syncStatusValidator,
+  syncSourceErrorValidator,
   syncSummaryValidator,
   type PricingSnapshot,
   type SyncStatus,
@@ -46,7 +48,7 @@ export const status = query({
       removalSkipped: false,
       durationMs: 0,
     };
-    if (!row) return { state: "never_synced", running: false, ...base };
+    if (!row) return { state: "never_synced", running: false, errors: [], ...base };
     const state =
       row.lastStatus === "error" ? "error" : row.lastSyncedAt === undefined ? "never_synced" : "ok";
     return {
@@ -58,7 +60,7 @@ export const status = query({
       ...(row.lastCheckedAt > 0 && { lastCheckedAt: row.lastCheckedAt }),
       ...(row.lastSyncedAt !== undefined && { lastSyncedAt: row.lastSyncedAt }),
       ...(row.lastStatus !== undefined && { lastStatus: row.lastStatus }),
-      ...(row.lastError !== undefined && { lastError: row.lastError }),
+      errors: row.errors,
       providerCount: row.providerCount,
       modelCount: row.modelCount,
       added: row.added,
@@ -83,13 +85,9 @@ export const tick = internalAction({
   returns: v.null(),
   handler: async (ctx) => {
     await runSync(ctx, { force: false, cron: true });
-    const config = await ctx.runQuery(internal.config.getEffective, {});
-    const cutoff = Date.now() - config.retentionDays * DAY_MS;
+
     for (let i = 0; i < 20; i++) {
-      const deleted = await ctx.runMutation(internal.sync.cleanupPriceChanges, {
-        cutoff,
-        limit: 500,
-      });
+      const deleted = await ctx.runMutation(internal.sync.cleanupPriceChanges, {});
       if (deleted < 500) break;
     }
     return null;
@@ -134,6 +132,7 @@ export const begin = internalMutation({
     else {
       await ctx.db.insert("syncState", {
         source: config.sourceUrl,
+        errors: [],
         lastCheckedAt: 0,
         providerCount: 0,
         modelCount: 0,
@@ -162,12 +161,15 @@ export const begin = internalMutation({
   },
 });
 
-/** True when `runId` still owns an unexpired lease; extends the lease as a side effect. */
 async function holdLease(ctx: MutationCtx, runId: string): Promise<boolean> {
   const row = await ctx.db.query("syncState").first();
   const now = Date.now();
   if (!row || row.runId !== runId || (row.leaseExpiresAt ?? 0) <= now) return false;
-  await ctx.db.patch("syncState", row._id, { leaseExpiresAt: now + LEASE_MS });
+  await ctx.db.patch("syncState", row._id, {
+    leaseExpiresAt: now + LEASE_MS,
+    etag: undefined,
+    contentHash: undefined,
+  });
   return true;
 }
 
@@ -222,7 +224,7 @@ export const upsertModels = internalMutation({
     for (const row of rows) {
       const existing = await ctx.db
         .query("models")
-        .withIndex("by_provider_model", (q) =>
+        .withIndex("by_providerId_and_modelId", (q) =>
           q.eq("providerId", row.providerId).eq("modelId", row.modelId),
         )
         .first();
@@ -278,15 +280,25 @@ export const upsertModels = internalMutation({
 export const modelKeysPage = internalQuery({
   args: { cursor: v.union(v.string(), v.null()), numItems: v.number() },
   returns: paginationResultValidator(
-    v.object({ id: v.id("models"), providerId: v.string(), modelId: v.string() }),
+    v.object({
+      id: v.id("models"),
+      providerId: v.string(),
+      modelId: v.string(),
+      hasCost: v.boolean(),
+    }),
   ),
   handler: async (ctx, { cursor, numItems }) => {
     const result = await paginator(ctx.db, schema)
       .query("models")
-      .withIndex("by_provider_model")
-      .paginate({ cursor, numItems });
+      .withIndex("by_providerId_and_modelId")
+      .paginate(boundedPage({ cursor, numItems }));
     return {
-      page: result.page.map((m) => ({ id: m._id, providerId: m.providerId, modelId: m.modelId })),
+      page: result.page.map((m) => ({
+        id: m._id,
+        providerId: m.providerId,
+        modelId: m.modelId,
+        hasCost: m.hasCost,
+      })),
       isDone: result.isDone,
       continueCursor: result.continueCursor,
     };
@@ -300,7 +312,7 @@ export const providerKeysPage = internalQuery({
     const result = await paginator(ctx.db, schema)
       .query("providers")
       .withIndex("by_providerId")
-      .paginate({ cursor, numItems });
+      .paginate(boundedPage({ cursor, numItems }));
     return {
       page: result.page.map((p) => ({ id: p._id, providerId: p.providerId })),
       isDone: result.isDone,
@@ -351,7 +363,7 @@ export const finish = internalMutation({
     source: v.optional(v.string()),
     etag: v.optional(v.string()),
     contentHash: v.optional(v.string()),
-    error: v.optional(v.string()),
+    errors: v.optional(v.array(syncSourceErrorValidator)),
     stats: v.optional(v.object(syncCountsFields)),
     durationMs: v.number(),
   },
@@ -367,20 +379,18 @@ export const finish = internalMutation({
       lastCheckedAt: now,
       lastStatus: args.status,
       durationMs: args.durationMs,
+      errors: args.errors ?? [],
     };
     if (args.status === "error") {
       await ctx.db.patch("syncState", row._id, {
         ...common,
-        lastError: (args.error ?? "unknown error").slice(0, 500),
       });
       return true;
     }
     if (args.status === "partial") {
-      // Removal was skipped: not a completed sync. Keep the last completed timestamp and
-      // counters, flag it, and forget the etag and hash so the next run retries.
       await ctx.db.patch("syncState", row._id, {
         ...common,
-        lastError: undefined,
+
         removalSkipped: true,
         etag: undefined,
         contentHash: undefined,
@@ -390,10 +400,14 @@ export const finish = internalMutation({
     }
     await ctx.db.patch("syncState", row._id, {
       ...common,
-      lastError: undefined,
+
       ...(args.source !== undefined && { source: args.source }),
-      ...(args.etag !== undefined && { etag: args.etag }),
-      ...(args.contentHash !== undefined && { contentHash: args.contentHash }),
+      ...(args.status === "ok"
+        ? { etag: args.etag, contentHash: args.contentHash }
+        : {
+            ...(args.etag !== undefined && { etag: args.etag }),
+            ...(args.contentHash !== undefined && { contentHash: args.contentHash }),
+          }),
       ...(args.status === "ok" && { lastSyncedAt: now, ...args.stats }),
     });
     return true;
@@ -401,13 +415,16 @@ export const finish = internalMutation({
 });
 
 export const cleanupPriceChanges = internalMutation({
-  args: { cutoff: v.number(), limit: v.number() },
+  args: {},
   returns: v.number(),
-  handler: async (ctx, { cutoff, limit }) => {
+  handler: async (ctx) => {
+    const config = await loadConfig(ctx);
+    if (!config.enabled) return 0;
+    const cutoff = Date.now() - config.retentionDays * DAY_MS;
     const rows = await ctx.db
       .query("priceChanges")
       .withIndex("by_at", (q) => q.lt("at", cutoff))
-      .take(limit);
+      .take(500);
     for (const row of rows) await ctx.db.delete("priceChanges", row._id);
     return rows.length;
   },

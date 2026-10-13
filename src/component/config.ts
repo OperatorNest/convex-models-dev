@@ -1,5 +1,6 @@
 import { v, type Infer } from "convex/values";
 import { internalQuery, mutation, query, type QueryCtx } from "./_generated/server.js";
+import { utf8Bytes, wellFormed } from "../shared/bounds.js";
 import { modelsDevError } from "../shared/errors.js";
 
 const PRIMARY_SOURCE_URL = "https://models.dev/api.json";
@@ -50,9 +51,9 @@ export const getEffective = internalQuery({
   handler: (ctx) => loadConfig(ctx),
 });
 
-function assertFinite(name: string, value: number, min: number) {
+function assertFinite(value: number, min: number) {
   if (!Number.isFinite(value) || value < min) {
-    throw modelsDevError("MODELS_DEV_INVALID_CONFIG", `${name} must be a finite number >= ${min}`);
+    throw modelsDevError("MODELS_DEV_INVALID_CONFIG");
   }
 }
 
@@ -68,28 +69,27 @@ export const configure = mutation({
   returns: effectiveConfigValidator,
   handler: async (ctx, args) => {
     if (args.sourceUrl !== undefined) {
+      if (!wellFormed(args.sourceUrl) || utf8Bytes(args.sourceUrl) > 2048)
+        throw modelsDevError("MODELS_DEV_INVALID_SOURCE_URL");
       let url: URL;
       try {
         url = new URL(args.sourceUrl);
       } catch {
-        throw modelsDevError("MODELS_DEV_INVALID_SOURCE_URL", "sourceUrl must be a valid URL");
+        throw modelsDevError("MODELS_DEV_INVALID_SOURCE_URL");
       }
       if (url.protocol !== "https:") {
-        throw modelsDevError("MODELS_DEV_INVALID_SOURCE_URL", "sourceUrl must use https");
+        throw modelsDevError("MODELS_DEV_INVALID_SOURCE_URL");
       }
       if (url.username || url.password) {
-        throw modelsDevError(
-          "MODELS_DEV_INVALID_SOURCE_URL",
-          "sourceUrl must not contain credentials",
-        );
+        throw modelsDevError("MODELS_DEV_INVALID_SOURCE_URL");
       }
     }
     if (args.minIntervalMinutes !== undefined) {
-      assertFinite("minIntervalMinutes", args.minIntervalMinutes, MIN_INTERVAL_FLOOR_MINUTES);
+      assertFinite(args.minIntervalMinutes, MIN_INTERVAL_FLOOR_MINUTES);
     }
-    if (args.retentionDays !== undefined) assertFinite("retentionDays", args.retentionDays, 1);
-    if (args.minProviders !== undefined) assertFinite("minProviders", args.minProviders, 0);
-    if (args.minModels !== undefined) assertFinite("minModels", args.minModels, 0);
+    if (args.retentionDays !== undefined) assertFinite(args.retentionDays, 1);
+    if (args.minProviders !== undefined) assertFinite(args.minProviders, 0);
+    if (args.minModels !== undefined) assertFinite(args.minModels, 0);
 
     const row = await ctx.db.query("config").first();
     if (row) await ctx.db.patch("config", row._id, args);

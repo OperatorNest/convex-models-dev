@@ -13,19 +13,16 @@ export function fixtureJson(mutate?: (catalog: Catalog) => void): string {
   return JSON.stringify(catalog);
 }
 
-/** One raw provider; throws when the fixture lacks it. */
 export function providerOf(catalog: Catalog, providerId: string): Catalog[string] {
   const provider = catalog[providerId];
   if (!provider) throw new Error(`fixture provider ${providerId} missing`);
   return provider;
 }
 
-/** The raw models of one provider; throws when the fixture lacks the provider. */
 export function modelsOf(catalog: Catalog, providerId: string): Record<string, RawModel> {
   return providerOf(catalog, providerId).models;
 }
 
-/** One raw model; throws when the fixture lacks it. */
 export function rawModel(catalog: Catalog, providerId: string, modelId: string): RawModel {
   const model = modelsOf(catalog, providerId)[modelId];
   if (!model) throw new Error(`fixture model ${providerId}/${modelId} missing`);

@@ -1,22 +1,13 @@
 # Security
 
-Report suspected vulnerabilities privately through [GitHub private vulnerability reporting](https://github.com/OperatorNest/convex-models-dev/security/advisories/new). If you cannot use GitHub, email [operatornest+security@gmail.com](mailto:operatornest+security@gmail.com). Include the affected package version or revision, the operation involved, a minimal reproduction and the impact you see.
+Report vulnerabilities through [GitHub private vulnerability reporting](https://github.com/OperatorNest/convex-models-dev/security/advisories/new) or [operatornest+security@gmail.com](mailto:operatornest+security@gmail.com). Include the version, operation, reproduction and impact. Keep exploit details private until maintainers coordinate disclosure. Only the latest published version receives fixes.
 
-Do not publish exploit details in an issue or pull request before maintainers have assessed the report. Maintainers will coordinate a response and any disclosure with the reporter.
+The component stores catalog data and sync settings, declares no environment variables and holds no credentials. Outbound requests are GETs to the configured HTTPS source and, on failure, `https://models.opencode.ai/api.json`. The configured source defaults to `https://models.dev/api.json`.
 
-## What this component does and does not hold
+- Catalog responses are untrusted. Download, Unicode, row-size, usable-row minimum and removal guards limit accepted data. Malformed models preserve their stored rows; malformed providers abort before writes.
+- Catalog writes require a live run lease and clear cached validators. A removal pass uses the pre-write catalog snapshot; deleting more than 20% requires `force`.
+- Source URLs require HTTPS, omit credentials and fit in 2048 UTF-8 bytes.
+- The host app authorizes component calls. Keep maintenance wrappers internal or require maintainer authorization. The example uses internal maintenance functions and authenticated public reads.
+- Stored and returned sync errors contain a fixed code/message pair and optional HTTP status. Upstream bodies, headers and exception text are excluded.
 
-`@operatornest/convex-models-dev` downloads a public catalog from `https://models.dev/api.json` (with `https://models.opencode.ai/api.json` as a fallback) and stores it in component tables. It has no API keys, no tokens, no webhooks and no environment variables, and it stores no personal data. Its only outbound request is a `GET` of the configured source URL.
-
-## Where problems are likely
-
-These are the areas worth a report:
-
-- **A hostile or broken upstream catalog.** The payload is untrusted. The sync validates every row, skips malformed models without deleting stored rows, aborts when the payload is smaller than `minProviders` or `minModels`, and skips a removal pass that would delete more than 20% of rows unless a caller passes `force`. Reports of a payload that gets past these guards, exhausts memory or time in the sync action, or corrupts stored rows are in scope.
-- **The source URL.** `config.update` accepts only `https` URLs without embedded credentials. A way to point the sync at a non-https, credentialed or otherwise unintended target is in scope.
-- **Caller authorization.** The component does not authenticate callers. `config.update` and `sync.now` are public component functions, and the host app must guard the functions that call them. A report that depends on an app leaving them open is not a component vulnerability, but unclear documentation about it is a bug.
-- **Stored error text.** `syncState.lastError` holds the host and HTTP status of a failure, never headers or bodies. A leak of other data there is in scope.
-
-## Supported versions
-
-Only the latest published version receives fixes.
+Reports of guard bypasses, unintended request targets, credential leaks or catalog corruption are in scope. Include app authorization code when the reproduction depends on a wrapper.

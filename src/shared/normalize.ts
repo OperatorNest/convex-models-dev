@@ -1,5 +1,6 @@
 import { modelsDevError } from "./errors.js";
 import { isRecord } from "./guards.js";
+import { jsonBytes, utf8Bytes, wellFormed } from "./bounds.js";
 import type {
   ModelRow,
   PriceFields,
@@ -17,20 +18,55 @@ export function modalityMask(modalities: readonly string[]): number {
   return mask;
 }
 
+const INDEX_STRING_BYTES = 1024;
+const INDEX_STRING_FIELDS = [
+  "providerId",
+  "modelId",
+  "family",
+  "canonicalModelId",
+  "releaseDate",
+  "searchText",
+] as const;
+
 class Invalid extends Error {}
 
 type Obj = Record<string, unknown>;
 
+function validStored(value: unknown): boolean {
+  if (typeof value === "string") return wellFormed(value) && utf8Bytes(value) <= 16384;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.length <= 128 && value.every(validStored);
+  if (isRecord(value))
+    return (
+      Object.entries(value).length <= 128 &&
+      Object.entries(value).every(([key, field]) => validStored(key) && validStored(field))
+    );
+  return true;
+}
+function rowFits(value: unknown): boolean {
+  return validStored(value) && jsonBytes(value) <= 65536;
+}
+function date(o: Obj, key: string): string {
+  const value = reqString(o, key);
+  const parsed = new Date(value);
+  if (
+    !/^\d{4}-\d{2}-\d{2}$/.test(value) ||
+    !Number.isFinite(parsed.getTime()) ||
+    parsed.toISOString().slice(0, 10) !== value
+  )
+    throw new Invalid(key);
+  return value;
+}
 function reqString(o: Obj, key: string): string {
   const value = o[key];
-  if (typeof value !== "string") throw new Invalid(key);
+  if (typeof value !== "string" || !validStored(value)) throw new Invalid(key);
   return value;
 }
 
 function optString(o: Obj, key: string): string | undefined {
   const value = o[key];
   if (value === undefined || value === null) return undefined;
-  if (typeof value !== "string") throw new Invalid(key);
+  if (typeof value !== "string" || !validStored(value)) throw new Invalid(key);
   return value;
 }
 
@@ -59,7 +95,7 @@ function optNum(o: Obj, key: string): number | undefined {
 }
 
 function strings(value: unknown, key: string): string[] {
-  if (!Array.isArray(value)) throw new Invalid(key);
+  if (!Array.isArray(value) || value.length > 128) throw new Invalid(key);
   const out: string[] = [];
   for (const item of value) {
     if (typeof item !== "string") throw new Invalid(key);
@@ -80,6 +116,7 @@ function priceFields(o: Obj): PriceFields {
     ["output_audio", "outputAudio"],
   ];
   for (const [from, to] of map) {
+    if (o[from] === null) throw new Invalid(from);
     const value = optNum(o, from);
     if (value !== undefined) out[to] = value;
   }
@@ -101,6 +138,7 @@ function parseTiers(cost: Obj): PriceTier[] | undefined {
     return tiers;
   }
   const legacy = cost.context_over_200k;
+  if (legacy !== undefined && !isRecord(legacy)) throw new Invalid("context_over_200k");
   if (isRecord(legacy)) return [{ size: 200_000, ...priceFields(legacy) }];
   return undefined;
 }
@@ -119,8 +157,9 @@ function parseReasoningOptions(raw: unknown): ModelRow["reasoningOptions"] {
         ),
       });
     } else if (entry.type === "budget_tokens") {
-      const min = typeof entry.min === "number" ? entry.min : undefined;
-      const max = typeof entry.max === "number" ? entry.max : undefined;
+      const min = optNum(entry, "min");
+      const max = optNum(entry, "max");
+      if (min !== undefined && max !== undefined && min > max) throw new Invalid("budget_tokens");
       out.push({
         type: "budget_tokens",
         ...(min !== undefined && { min }),
@@ -132,20 +171,20 @@ function parseReasoningOptions(raw: unknown): ModelRow["reasoningOptions"] {
 }
 
 function parseModes(raw: unknown): ModelRow["modes"] {
-  if (!isRecord(raw)) return undefined;
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw)) throw new Invalid("modes");
   const out: NonNullable<ModelRow["modes"]> = {};
   for (const [name, mode] of Object.entries(raw)) {
-    if (!MODE_NAME.test(name) || !isRecord(mode) || !isRecord(mode.cost)) continue;
-    const tiers = Array.isArray(mode.cost.tiers) ? parseTiers(mode.cost) : undefined;
+    if (!MODE_NAME.test(name)) continue;
+    if (!isRecord(mode)) throw new Invalid("mode");
+    if (mode.cost === undefined) continue;
+    if (!isRecord(mode.cost)) throw new Invalid("mode");
+    const tiers = parseTiers(mode.cost);
     out[name] = { cost: priceFields(mode.cost), ...(tiers && { tiers }) };
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-/**
- * Validates and flattens one upstream model. Returns null when the entry is
- * structurally unusable; unknown fields are ignored.
- */
 export function normalizeModel(providerId: string, modelId: string, raw: unknown): ModelRow | null {
   if (!isRecord(raw)) return null;
   try {
@@ -170,9 +209,10 @@ export function normalizeModel(providerId: string, modelId: string, raw: unknown
       outputMask: modalityMask(outputModalities),
       contextLimit: num(limit.context, "limit.context"),
       outputLimit: num(limit.output, "limit.output"),
-      releaseDate: reqString(raw, "release_date"),
-      lastUpdated: reqString(raw, "last_updated"),
+      releaseDate: date(raw, "release_date"),
+      lastUpdated: date(raw, "last_updated"),
       hasCost: false,
+      costOrder: 0,
     };
     const assign = <K extends keyof ModelRow>(key: K, value: ModelRow[K] | undefined) => {
       if (value !== undefined) row[key] = value;
@@ -191,6 +231,7 @@ export function normalizeModel(providerId: string, modelId: string, raw: unknown
       row.interleaved = { field: raw.interleaved.field };
     }
 
+    if (raw.cost !== undefined && !isRecord(raw.cost)) throw new Invalid("cost");
     if (isRecord(raw.cost)) {
       const cost = priceFields(raw.cost);
       if (cost.input === undefined || cost.output === undefined) throw new Invalid("cost");
@@ -202,7 +243,8 @@ export function normalizeModel(providerId: string, modelId: string, raw: unknown
       assign("costReasoning", cost.reasoning);
       assign("costInputAudio", cost.inputAudio);
       assign("costOutputAudio", cost.outputAudio);
-      row.costBlended = (3 * cost.input + cost.output) / 4;
+      row.costBlended = cost.input * 0.75 + cost.output * 0.25;
+      row.costOrder = -row.costBlended;
       assign("tiers", parseTiers(raw.cost));
     }
 
@@ -217,7 +259,13 @@ export function normalizeModel(providerId: string, modelId: string, raw: unknown
       if (typeof provider.shape === "string") override.shape = provider.shape;
       if (Object.keys(override).length > 0) row.providerOverride = override;
     }
-    return row;
+    return rowFits(row) &&
+      INDEX_STRING_FIELDS.every((field) => {
+        const value = row[field];
+        return value === undefined || utf8Bytes(value) <= INDEX_STRING_BYTES;
+      })
+      ? row
+      : null;
   } catch (error) {
     if (error instanceof Invalid) return null;
     throw error;
@@ -229,41 +277,38 @@ export function normalizeProvider(
   raw: unknown,
   modelCount: number,
 ): ProviderRow | null {
-  if (!isRecord(raw)) return null;
-  const row: ProviderRow = {
-    providerId,
-    name: typeof raw.name === "string" ? raw.name : providerId,
-    env: Array.isArray(raw.env)
-      ? raw.env.filter((item): item is string => typeof item === "string")
-      : [],
-    modelCount,
-  };
-  if (typeof raw.npm === "string") row.npm = raw.npm;
-  if (typeof raw.doc === "string") row.doc = raw.doc;
-  if (typeof raw.api === "string") row.api = raw.api;
-  return row;
+  if (!isRecord(raw) || !wellFormed(providerId) || utf8Bytes(providerId) > INDEX_STRING_BYTES)
+    return null;
+  try {
+    const row: ProviderRow = {
+      providerId,
+      name: optString(raw, "name") ?? providerId,
+      env: raw.env === undefined ? [] : strings(raw.env, "env"),
+      modelCount,
+    };
+    for (const field of ["npm", "doc", "api"] as const) {
+      const value = optString(raw, field);
+      if (value !== undefined) row[field] = value;
+    }
+    return rowFits(row) ? row : null;
+  } catch (error) {
+    if (error instanceof Invalid) return null;
+    throw error;
+  }
 }
 
-/** Counts of usable (validated) providers and models, plus models that failed validation. */
 export type CatalogShape = { providerCount: number; modelCount: number; skippedModels: number };
 
-/**
- * Validates the top level (throws unless it is a provider map) and counts the usable
- * rows: models that normalize, and providers with at least one such model.
- */
 export function inspectCatalog(raw: unknown): CatalogShape {
-  if (!isRecord(raw)) throw new Error("catalog is not an object");
+  if (!isRecord(raw)) throw modelsDevError("MODELS_DEV_INVALID_CATALOG");
   let providerCount = 0;
   let modelCount = 0;
   let skippedModels = 0;
   for (const [providerId, provider] of Object.entries(raw)) {
-    // A malformed provider must abort the sync before any write: skipping it would let the
-    // removal pass delete that provider's stored rows.
-    if (!isRecord(provider) || !isRecord(provider.models)) {
-      throw modelsDevError(
-        "MODELS_DEV_INVALID_CATALOG",
-        `provider "${providerId}" has no models object; refusing to sync`,
-      );
+    if (!isRecord(provider) || !isRecord(provider.models)) continue;
+    if (!normalizeProvider(providerId, provider, Object.keys(provider.models).length)) {
+      skippedModels += Object.keys(provider.models).length;
+      continue;
     }
     let usable = 0;
     for (const [modelId, model] of Object.entries(provider.models)) {
@@ -276,7 +321,6 @@ export function inspectCatalog(raw: unknown): CatalogShape {
   return { providerCount, modelCount, skippedModels };
 }
 
-/** The pricing portion of a stored row, for change detection and history. */
 export function pricingOf(row: ModelRow | undefined | null): PricingSnapshot | undefined {
   if (!row || (!row.hasCost && !row.modes)) return undefined;
   const out: PricingSnapshot = {};

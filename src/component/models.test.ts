@@ -221,7 +221,10 @@ describe("search", () => {
 describe("cheapest", () => {
   test("ranks by blended cost, never returns models without cost", async () => {
     const t = await syncedCatalog();
-    const rows = await t.query(api.models.cheapest, { limit: 20, excludeDeprecated: false });
+    const { models: rows } = await t.query(api.models.cheapest, {
+      limit: 20,
+      excludeDeprecated: false,
+    });
     expect(rows.every((m) => m.hasCost)).toBe(true);
     const costs = rows.map((m) => m.costBlended);
     expect(costs).toEqual([...costs].toSorted((a, b) => (a ?? 0) - (b ?? 0)));
@@ -230,26 +233,32 @@ describe("cheapest", () => {
 
   test("applies capability filters and the free/deprecated switches", async () => {
     const t = await syncedCatalog();
-    const defaults = await t.query(api.models.cheapest, { toolCall: true });
+    const { models: defaults } = await t.query(api.models.cheapest, { toolCall: true });
     expect(defaults.map((m) => m.status)).not.toContain("deprecated");
     expect(defaults.every((m) => m.toolCall)).toBe(true);
-    const free = await t.query(api.models.cheapest, { limit: 1 });
+    const { models: free } = await t.query(api.models.cheapest, { limit: 1 });
     expect(free[0]).toMatchObject({ modelId: "lyria-3-pro-preview", costBlended: 0 });
-    const paid = await t.query(api.models.cheapest, { excludeFree: true, limit: 1 });
+    const { models: paid } = await t.query(api.models.cheapest, { excludeFree: true, limit: 1 });
     expect(paid[0]?.costBlended).toBeGreaterThan(0);
-    const ctx = await t.query(api.models.cheapest, {
+    const { models: ctx } = await t.query(api.models.cheapest, {
       minContext: 1_000_000,
       excludeFree: true,
       limit: 3,
     });
     expect(ctx.every((m) => m.contextLimit >= 1_000_000)).toBe(true);
-    const audio = await t.query(api.models.cheapest, { inputModalities: ["audio"], limit: 20 });
+    const { models: audio } = await t.query(api.models.cheapest, {
+      inputModalities: ["audio"],
+      limit: 20,
+    });
     expect(ids(audio).toSorted()).toEqual([
       "google/gemini-2.5-flash",
       "google/gemini-2.5-pro",
       "google/gemini-3.5-flash",
     ]);
-    const scoped = await t.query(api.models.cheapest, { providerIds: ["anthropic"], limit: 20 });
+    const { models: scoped } = await t.query(api.models.cheapest, {
+      providerIds: ["anthropic"],
+      limit: 20,
+    });
     expect(scoped.every((m) => m.providerId === "anthropic")).toBe(true);
     expect(scoped[0]?.modelId).toBe("claude-haiku-4-5");
   });
@@ -258,12 +267,12 @@ describe("cheapest", () => {
     const t = await syncedCatalog((c) => {
       rawModel(c, "openai", "gpt-5.4").canonical_model_id = "openai/gpt-5.4";
     });
-    const plain = await t.query(api.models.cheapest, {
+    const { models: plain } = await t.query(api.models.cheapest, {
       providerIds: ["openai", "azure"],
       limit: 20,
     });
     expect(plain.filter((m) => m.modelId === "gpt-5.4")).toHaveLength(2);
-    const distinct = await t.query(api.models.cheapest, {
+    const { models: distinct } = await t.query(api.models.cheapest, {
       providerIds: ["openai", "azure"],
       limit: 20,
       distinctCanonical: true,
@@ -291,7 +300,7 @@ describe("cheapest over large ties", () => {
       }),
     });
     await t.action(api.sync.syncNow, { force: true });
-    const rows = await t.query(api.models.cheapest, {
+    const { models: rows } = await t.query(api.models.cheapest, {
       minContext: 2_000_000,
       limit: 20,
       excludeDeprecated: false,
@@ -467,7 +476,7 @@ describe("list pagination bounds", () => {
     const next = await t.query(api.models.list, {
       paginationOpts: { numItems: 3, cursor: first.continueCursor },
     });
-    // A newer model lands inside the first page's range.
+
     await t.run((ctx) =>
       ctx.db.insert("models", {
         ...fixtureModel("openai", "gpt-5.4"),
@@ -479,7 +488,7 @@ describe("list pagination bounds", () => {
       }),
     );
     const reread = await t.query(api.models.list, {
-      paginationOpts: { numItems: 3, cursor: null, endCursor: first.continueCursor },
+      paginationOpts: { numItems: 5, cursor: null, endCursor: first.continueCursor },
     });
     expect(reread.continueCursor).toBe(first.continueCursor);
     expect(ids(reread.page)).toEqual(["openai/newest", ...ids(first.page)]);
@@ -505,11 +514,11 @@ describe("list pagination bounds", () => {
     expect(rest.isDone).toBe(true);
   });
 
-  test("a huge maximumRowsRead stops at 4,000 rows", async () => {
+  test("maximumRowsRead cannot exceed numItems plus one", async () => {
     const t = componentTest();
     const base = fixtureModel("openai", "gpt-5.4");
     await t.run(async (ctx) => {
-      for (let i = 0; i < 4100; i++) {
+      for (let i = 0; i < 102; i++) {
         await ctx.db.insert("models", {
           ...base,
           modelId: `m-${i}`,

@@ -74,10 +74,11 @@
     "fmt:check": "oxfmt --check .",
     "test": "vitest run --coverage",
     "test:watch": "vitest",
-    "check": "pnpm fmt:check && pnpm build && pnpm lint && pnpm typecheck && pnpm knip && pnpm test",
+    "check": "pnpm fmt:check && pnpm build && pnpm lint && pnpm typecheck && pnpm knip && pnpm check:source && pnpm test",
     "changeset": "changeset",
     "smoke": "node scripts/smoke.mjs",
-    "knip": "knip --no-progress"
+    "knip": "knip --no-progress",
+    "check:source": "node scripts/check-source.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "3.0.3",
@@ -98,10 +99,10 @@
   },
   "peerDependencies": {
     "convex": "^1.46.0",
-    "convex-helpers": "^0.1.106"
+    "convex-helpers": "^0.1.127"
   },
   "engines": {
-    "node": ">=22.19.0"
+    "node": ">=24"
   },
   "packageManager": "pnpm@12.9.1"
 }

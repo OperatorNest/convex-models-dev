@@ -1,8 +1,3 @@
-/**
- * AI SDK `LanguageModel.provider` strings (for example "anthropic.messages" or
- * "google.vertex.chat") are not models.dev provider ids. These aliases cover
- * the common mismatches; pass `aliases` to extend or override them.
- */
 export const DEFAULT_PROVIDER_ALIASES: Readonly<Record<string, string>> = {
   gateway: "vercel",
   "google.generative-ai": "google",
@@ -15,7 +10,6 @@ export const DEFAULT_PROVIDER_ALIASES: Readonly<Record<string, string>> = {
   together: "togetherai",
 };
 
-/** Candidate models.dev provider ids for an AI SDK provider string, best first. */
 export function providerCandidates(
   provider: string,
   aliases: Record<string, string> = {},
@@ -33,11 +27,6 @@ export function providerCandidates(
   return [...new Set(candidates)];
 }
 
-/**
- * Maps an AI SDK / Agent `{ provider, model }` pair to a models.dev
- * `{ providerId, modelId }`. Pure and best effort: the component's
- * `models.resolve` additionally checks candidates against the catalog.
- */
 export function resolveModel(args: {
   provider: string;
   model: string;
@@ -47,10 +36,6 @@ export function resolveModel(args: {
   return { providerId: providerId ?? args.provider, modelId: args.model };
 }
 
-/**
- * Splits "provider/model" or "provider:model" at the first separator whose left
- * side is a known provider id. Model ids themselves contain "/" and ":".
- */
 export function splitModelKey(
   key: string,
   isProvider: (providerId: string) => boolean,

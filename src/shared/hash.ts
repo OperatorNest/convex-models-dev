@@ -11,7 +11,6 @@ export async function sha256Hex(data: string | BufferSource): Promise<string> {
   return toHex(await crypto.subtle.digest("SHA-256", bytes));
 }
 
-/** JSON with sorted keys and `undefined` dropped, so equal values hash equally. */
 export function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== "object") {
     return JSON.stringify(value) ?? "null";
@@ -23,7 +22,6 @@ export function canonicalJson(value: unknown): string {
   return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`;
 }
 
-/** Short stable fingerprint of a normalized row. */
 export async function rowHash(value: unknown): Promise<string> {
   return (await sha256Hex(canonicalJson(value))).slice(0, 32);
 }
