@@ -13,7 +13,7 @@
 - Partial runs record `partialReason` (`price_loss` or `removal`) and their counters; export the `PartialReason` type.
 - A provider's `modelCount` counts only its models that pass normalization.
 - An expired lease that no other run took over keeps accepting its run's writes and finish.
-- Breaking: catalog downloads above 8 MiB fail with `MODELS_DEV_CATALOG_TOO_LARGE`, keeping the measured peak action heap at or below 32 MiB. Size the download buffer from `content-length`, growing it by doubling up to 8 MiB when the header is absent.
+- Breaking: catalog downloads above 8 MiB fail with `MODELS_DEV_CATALOG_TOO_LARGE`, keeping the measured peak action heap at or below 32 MiB. Catalog requests do not follow redirects: a 3xx response fails with `MODELS_DEV_INVALID_RESPONSE`. The body is decoded as UTF-8 while it streams, with no whole-catalog byte buffer; a body that is not well-formed UTF-8 fails with `MODELS_DEV_INVALID_RESPONSE`.
 - Breaking: normalized model rows above 4 KiB of serialized JSON are skipped; provider rows keep the 64 KiB limit.
 - Breaking: rename the `estimateCost` result field `priceSnapshotAt` to `modelUpdatedAt`; it is the time the component last wrote the stored model row, not an upstream date.
 - Breaking: `config.update` rejects a `sourceUrl` with a query or fragment with `MODELS_DEV_INVALID_ARGUMENT`.

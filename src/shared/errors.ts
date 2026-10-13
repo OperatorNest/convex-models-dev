@@ -20,9 +20,9 @@ const MODELS_DEV_PROVIDER_ERROR_CODES = [
 ] as const satisfies readonly ModelsDevErrorCode[];
 
 const MODELS_DEV_ERROR_MESSAGES = {
-  MODELS_DEV_INVALID_ARGUMENT: "An argument is malformed or outside its bounds.",
+  MODELS_DEV_INVALID_ARGUMENT: "An argument is missing, malformed or out of bounds.",
   MODELS_DEV_PROVIDER_ERROR: "The catalog provider returned a failure response.",
-  MODELS_DEV_NETWORK_ERROR: "The catalog request or body read failed.",
+  MODELS_DEV_NETWORK_ERROR: "The request to models.dev failed before a response arrived.",
   MODELS_DEV_INVALID_RESPONSE: "The catalog response is malformed.",
   MODELS_DEV_CATALOG_TOO_SMALL: "The catalog has fewer usable providers or models than configured.",
   MODELS_DEV_CATALOG_TOO_LARGE: "The catalog exceeds 8 MiB.",
@@ -46,6 +46,7 @@ export type ModelsDevErrorCode = (typeof MODELS_DEV_ERROR_CODES)[number];
 export type ModelsDevErrorData = {
   code: ModelsDevErrorCode;
   message: string;
+  /** `true` only when repeating the identical call cannot create a second provider effect: the call is a read, the call carries an idempotency key the component or provider deduplicates, or the provider definitively refused without effect. */
   retryable?: boolean;
   providerStatus?: number;
   providerCode?: string;

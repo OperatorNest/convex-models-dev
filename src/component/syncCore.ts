@@ -1,5 +1,5 @@
 import { isModelsDevError, modelsDevError, type ModelsDevErrorData } from "../shared/errors.js";
-import { jsonBytes } from "../shared/bounds.js";
+import { jsonBytes, readBoundedText } from "../shared/bounds.js";
 import type { Id } from "./_generated/dataModel.js";
 import { internal } from "./_generated/api.js";
 import type { ActionCtx } from "./_generated/server.js";
@@ -52,6 +52,8 @@ function failureData(error: unknown): ModelsDevErrorData {
   return isModelsDevError(error) ? error.data : modelsDevError("MODELS_DEV_SYNC_FAILED").data;
 }
 
+const BYTE_ORDER_MARK = "\uFEFF";
+
 async function readNetwork<T>(pending: Promise<T>): Promise<T> {
   try {
     return await pending;
@@ -60,43 +62,41 @@ async function readNetwork<T>(pending: Promise<T>): Promise<T> {
     throw modelsDevError("MODELS_DEV_NETWORK_ERROR", { retryable: true });
   }
 }
-const INITIAL_BUFFER_BYTES = 1024 * 1024;
 
-async function readCatalog(response: Response): Promise<Uint8Array<ArrayBuffer>> {
-  const declared = Number(response.headers.get("content-length") ?? Number.NaN);
-  if (declared > MAX_CATALOG_BYTES) {
-    await response.body?.cancel();
-    throw modelsDevError("MODELS_DEV_CATALOG_TOO_LARGE");
-  }
-  if (!response.body) throw modelsDevError("MODELS_DEV_INVALID_RESPONSE");
-  const reader = response.body.getReader();
-  let data = new Uint8Array(
-    Number.isSafeInteger(declared) && declared > 0 ? declared : INITIAL_BUFFER_BYTES,
+function countBytes(body: ReadableStream<Uint8Array>, onChunk: (byteCount: number) => void) {
+  const reader = body.getReader();
+  return new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          controller.close();
+          return;
+        }
+        onChunk(chunk.value.byteLength);
+        controller.enqueue(chunk.value);
+      },
+      cancel: (reason) => reader.cancel(reason),
+    },
+    { highWaterMark: 0 },
   );
-  let bytes = 0;
-  try {
-    for (;;) {
-      const chunk = await readNetwork(reader.read());
-      if (chunk.done) break;
-      const needed = bytes + chunk.value.byteLength;
-      if (needed > MAX_CATALOG_BYTES) {
-        await reader.cancel();
-        throw modelsDevError("MODELS_DEV_CATALOG_TOO_LARGE");
-      }
-      if (needed > data.byteLength) {
-        let capacity = data.byteLength;
-        while (capacity < needed) capacity *= 2;
-        const grown = new Uint8Array(Math.min(capacity, MAX_CATALOG_BYTES));
-        grown.set(data.subarray(0, bytes));
-        data = grown;
-      }
-      data.set(chunk.value, bytes);
-      bytes = needed;
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  return data.subarray(0, bytes);
+}
+
+async function readCatalogText(response: Response): Promise<string> {
+  let streamedBytes = 0;
+  const counted =
+    response.body &&
+    countBytes(response.body, (byteCount) => {
+      streamedBytes += byteCount;
+    });
+  const text = await readNetwork(
+    readBoundedText(new Response(counted, { headers: response.headers }), MAX_CATALOG_BYTES),
+  );
+  if (text !== undefined) return text;
+  const isTooLarge =
+    streamedBytes > MAX_CATALOG_BYTES ||
+    Number(response.headers.get("content-length")) > MAX_CATALOG_BYTES;
+  throw modelsDevError(isTooLarge ? "MODELS_DEV_CATALOG_TOO_LARGE" : "MODELS_DEV_INVALID_RESPONSE");
 }
 
 async function loadCatalog(
@@ -113,12 +113,18 @@ async function loadCatalog(
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  let buffer: Uint8Array<ArrayBuffer> | null;
+  let text: string | null;
   let etag: string | undefined;
   try {
-    const response = await readNetwork(fetch(url, { headers, signal: controller.signal }));
+    const response = await readNetwork(
+      fetch(url, { headers, redirect: "manual", signal: controller.signal }),
+    );
     if (response.status === 304 && headers["if-none-match"]) {
       return { kind: "not_modified", url };
+    }
+    if (response.type === "opaqueredirect" || (response.status >= 300 && response.status < 400)) {
+      await response.body?.cancel();
+      throw modelsDevError("MODELS_DEV_INVALID_RESPONSE");
     }
     if (!response.ok) {
       await response.body?.cancel();
@@ -129,21 +135,19 @@ async function loadCatalog(
     }
     const responseEtag = response.headers.get("etag");
     etag = responseEtag?.isWellFormed() && responseEtag.length <= 2048 ? responseEtag : undefined;
-    buffer = await readCatalog(response);
+    text = await readCatalogText(response);
   } finally {
     clearTimeout(timer);
   }
 
-  const contentHash = await sha256Hex(buffer);
+  const contentHash = await sha256Hex(text);
   if (sameSource && state?.contentHash === contentHash) {
     return { kind: "not_modified", url, ...(etag && { etag }), contentHash };
   }
 
-  let text: string | null = new TextDecoder().decode(buffer);
-  buffer = null;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    parsed = JSON.parse(text.startsWith(BYTE_ORDER_MARK) ? text.slice(1) : text);
   } catch {
     throw modelsDevError("MODELS_DEV_INVALID_RESPONSE");
   }

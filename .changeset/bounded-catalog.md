@@ -6,7 +6,7 @@
 - Breaking: minimum query limits become `minContextTokens` and `minOutputTokens`.
 - Breaking: replace `sync.now` and its `force` flag with guarded `sync.run` and explicit `sync.runForced` operations.
 - Breaking: sync summaries retain only the ordered `errors` array; skipped invocations use `reason`.
-- Breaking: use `MODELS_DEV_INVALID_ARGUMENT` for invalid settings, `MODELS_DEV_INVALID_RESPONSE` for malformed catalogs, `MODELS_DEV_PROVIDER_ERROR` for HTTP failures `MODELS_DEV_NETWORK_ERROR` for a failed request or body read, and `MODELS_DEV_SYNC_FAILED` for any other sync failure without a specific code.
+- Breaking: use `MODELS_DEV_INVALID_ARGUMENT` (message "An argument is missing, malformed or out of bounds.") for invalid settings, `MODELS_DEV_INVALID_RESPONSE` for malformed catalogs, `MODELS_DEV_PROVIDER_ERROR` for HTTP failures `MODELS_DEV_NETWORK_ERROR` for a failed request or body read (message "The request to models.dev failed before a response arrived."), and `MODELS_DEV_SYNC_FAILED` for any other sync failure without a specific code.
 - Breaking: error guards require the fixed message for the code, validate optional provider diagnostics, require `retryable` for provider and network failures and reject it for every other code.
 - Breaking: cost estimation requires an explicit `mode` (`null` for base pricing) and `inputTokenScope` (`includesCache` or `excludesCache`).
 - Breaking: rename `usageFromAgent` to `extractUsage`, `providerCandidates` to `listProviderCandidates`, `PriceFields` to `CostFields` and `PriceTier` to `CostTier`.
@@ -23,5 +23,5 @@
 - Preserve stored rows for malformed catalog models and providers while enforcing download, Unicode, collection, indexed-string and row-size bounds.
 - Compare removals with the pre-write catalog and prevent guarded syncs from removing prices from more than 20% of stored priced models.
 - Clear cache validators before catalog writes and restore them only after a completed data sync.
-- Retention mutations reread enablement and retention settings before every bounded deletion batch.
+- Breaking: history cleanup moves to the internal `cleanup.run` mutation and its hourly `cleanup` cron, which runs whether or not `enabled` is set and whether or not syncs succeed; each run reads `retentionDays`, deletes at most 500 expired documents and schedules another run when its batch fills.
 - Select equivalent models by price before applying the result limit and return unknown pricing for an unpriced requested mode.

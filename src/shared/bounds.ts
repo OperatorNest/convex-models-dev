@@ -11,6 +11,49 @@ export function truncateText(value: string, max: number): string {
   return text.slice(0, last >= 0xd800 && last <= 0xdbff ? end - 1 : end);
 }
 
+async function readTextChunks(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  decoder: TextDecoder,
+  maxBytes: number,
+  byteCount: number,
+  text: string,
+): Promise<string | undefined> {
+  const chunk = await reader.read();
+  const nextByteCount = byteCount + (chunk.value?.byteLength ?? 0);
+  if (nextByteCount > maxBytes) {
+    await reader.cancel();
+    return undefined;
+  }
+  let decoded: string;
+  try {
+    decoded = decoder.decode(chunk.value, { stream: !chunk.done });
+  } catch {
+    await reader.cancel();
+    return undefined;
+  }
+  if (chunk.done) return text + decoded;
+  return readTextChunks(reader, decoder, maxBytes, nextByteCount, text + decoded);
+}
+
+/** Reads the body of `message` as UTF-8 text. Returns `undefined`, and stops reading, when `content-length` or the streamed byte count exceeds `maxBytes` or when the bytes are not well-formed UTF-8. A leading byte order mark is kept, so the text re-encodes to the received bytes. A missing body reads as `""`. */
+export async function readBoundedText(
+  message: Request | Response,
+  maxBytes: number,
+): Promise<string | undefined> {
+  if (Number(message.headers.get("content-length")) > maxBytes) {
+    await message.body?.cancel();
+    return undefined;
+  }
+  if (message.body === null) return "";
+  return readTextChunks(
+    message.body.getReader(),
+    new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }),
+    maxBytes,
+    0,
+    "",
+  );
+}
+
 /** Throws `MODELS_DEV_INVALID_ARGUMENT` unless `cursor` is well-formed, at most 4096 characters, and a JSON array of at most 16 primitive values whose strings are well-formed. */
 export function validateCursor(cursor: string): void {
   const isBoundedText = cursor.length <= 4096 && cursor.isWellFormed();

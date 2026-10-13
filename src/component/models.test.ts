@@ -610,10 +610,8 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-test("disabled ticks and changed retention preserve history", async () => {
+test("cleanup deletes expired history while sync is disabled and rereads retention", async () => {
   const t = setupTest();
-  await relaxGuards(t);
-  catalogServer({ body: fixtureJson() });
   const changedAt = Date.now() - 40 * 86400000;
   await t.run((ctx) =>
     ctx.db.insert("priceChanges", {
@@ -623,16 +621,14 @@ test("disabled ticks and changed retention preserve history", async () => {
       kind: "price",
     }),
   );
-  await t.mutation(api.config.update, { enabled: false, retentionDays: 30 });
-  await t.action(internal.sync.tick, {});
-  expect(
-    await t.query(api.models.listPriceChanges, { modelsDevProviderId: "p", modelsDevModelId: "m" }),
-  ).toHaveLength(1);
-  await t.mutation(api.config.update, { enabled: true, retentionDays: 365 });
-  await t.mutation(internal.sync.cleanupPriceChanges, {});
-  expect(
-    await t.query(api.models.listPriceChanges, { modelsDevProviderId: "p", modelsDevModelId: "m" }),
-  ).toHaveLength(1);
+  const listed = () =>
+    t.query(api.models.listPriceChanges, { modelsDevProviderId: "p", modelsDevModelId: "m" });
+  await t.mutation(api.config.update, { enabled: false, retentionDays: 365 });
+  await t.mutation(internal.cleanup.run, {});
+  expect(await listed()).toHaveLength(1);
+  await t.mutation(api.config.update, { retentionDays: 30 });
+  await t.mutation(internal.cleanup.run, {});
+  expect(await listed()).toHaveLength(0);
 });
 
 test("equivalents selects the cheapest provider before applying the limit", async () => {

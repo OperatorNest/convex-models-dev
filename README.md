@@ -8,7 +8,7 @@ Mirror the [models.dev](https://models.dev) model catalog into Convex tables. Qu
 ## Install
 
 ```sh
-pnpm add @operatornest/convex-models-dev convex convex-helpers
+pnpm add @operatornest/convex-models-dev convex convex-helpers@^0.1.128
 ```
 
 Node.js 24 or newer, `convex ^1.46.0` and `convex-helpers ^0.1.128` are required.
@@ -52,7 +52,7 @@ export const syncNow = internalAction({
 
 The component does not authenticate callers. Keep maintenance wrappers internal or require maintainer authorization before calling `sync.run` or `config.update`. The [example app](https://github.com/OperatorNest/convex-models-dev/blob/main/example/convex/example.ts) uses internal maintenance functions and requires authentication for public queries. Configure your app's authentication provider before using those queries.
 
-Before the first sync, catalog queries return empty results and `sync.getStatus().state` is `never_synced`. The component owns its hourly cron.
+Before the first sync, catalog queries return empty results and `sync.getStatus().state` is `never_synced`. The component owns two hourly crons: `sync models.dev catalog` and `cleanup`.
 
 ## Concepts
 
@@ -113,10 +113,10 @@ Catalog terms follow the [models.dev schema](https://github.com/anomalyco/models
 
 | Setting              | Default                       | Accepted values and behavior                                                                                                              |
 | -------------------- | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`            | `true`                        | `false` disables cron sync and history cleanup; manual sync still works.                                                                  |
+| `enabled`            | `true`                        | `false` disables cron sync; manual sync and history cleanup still run.                                                                    |
 | `sourceUrl`          | `https://models.dev/api.json` | HTTPS URL without credentials, query or fragment, at most 2048 UTF-8 bytes. The fallback is always `https://models.opencode.ai/api.json`. |
 | `minIntervalMinutes` | `15`                          | Finite number at least 15; cron checks allow five minutes of tolerance.                                                                   |
-| `retentionDays`      | `365`                         | Finite number at least 1; expired history is deleted only by enabled cron ticks.                                                          |
+| `retentionDays`      | `365`                         | Finite number at least 1; the hourly `cleanup` cron deletes history older than this.                                                      |
 | `minProviders`       | `50`                          | Finite number at least 0; minimum providers with a usable model.                                                                          |
 | `minModels`          | `1000`                        | Finite number at least 0; minimum usable models.                                                                                          |
 
@@ -148,9 +148,9 @@ const estimate =
 
 ## Catalog synchronization
 
-`sync.run(ctx)` synchronizes with interval, removal and price-loss guards. `sync.runForced(ctx)` bypasses those guards. Both are actions. A failed sync records the failure instead of rethrowing: `sync.run`, `sync.runForced` and the hourly cron store the ordered `errors` in sync status and release the lease; `sync.run` and `sync.runForced` resolve with a `status: "error"` summary, and the cron tick still runs history cleanup. A failed sync also sets `lastCheckedAt`, so the next `sync.run` or cron run within `minIntervalMinutes` is skipped with `min_interval`; this spaces retries against a failing upstream. Use `sync.runForced` to retry sooner. Overlapping runs are skipped while a lease is live. A lease lasts three minutes and each catalog mutation renews it. Writes and the finish are fenced by run ID, not by lease expiry: a run whose lease expired keeps writing until another run takes the lease, then stops with `MODELS_DEV_LEASE_LOST`.
+`sync.run(ctx)` synchronizes with interval, removal and price-loss guards. `sync.runForced(ctx)` bypasses those guards. Both are actions. A failed sync records the failure instead of rethrowing: `sync.run`, `sync.runForced` and the hourly cron store the ordered `errors` in sync status and release the lease; `sync.run` and `sync.runForced` resolve with a `status: "error"` summary. A failed sync also sets `lastCheckedAt`, so the next `sync.run` or cron run within `minIntervalMinutes` is skipped with `min_interval`; this spaces retries against a failing upstream. Use `sync.runForced` to retry sooner. Overlapping runs are skipped while a lease is live. A lease lasts three minutes and each catalog mutation renews it. Writes and the finish are fenced by run ID, not by lease expiry: a run whose lease expired keeps writing until another run takes the lease, then stops with `MODELS_DEV_LEASE_LOST`.
 
-A run conditionally fetches its configured source, then the fallback on failure, with a 60-second timeout per source and an 8 MiB streamed body limit. The download buffer starts at the declared `content-length` and otherwise at 1 MiB, doubling as bytes arrive, never beyond 8 MiB. The limit keeps the measured peak action heap, about 3.9 times the catalog bytes (31 MiB for an 8 MiB catalog), at or below half of Convex's 64 MiB action memory. A 304 or unchanged source-qualified hash skips catalog writes; this still runs the begin and finish mutations. Parsed catalogs must satisfy the configured usable-row minimums before writes.
+A run conditionally fetches its configured source, then the fallback on failure, with a 60-second timeout per source and an 8 MiB streamed body limit. Requests do not follow redirects: a 3xx response is `MODELS_DEV_INVALID_RESPONSE`. The body is decoded as UTF-8 while it streams; a declared `content-length` or a streamed byte count above 8 MiB stops the read with `MODELS_DEV_CATALOG_TOO_LARGE`, and bytes that are not well-formed UTF-8 stop it with `MODELS_DEV_INVALID_RESPONSE`. A leading byte order mark is ignored when parsing. The limit keeps the measured peak action heap, about 3.8 times the catalog bytes (30.4 MiB for an 8 MiB catalog), at or below half of Convex's 64 MiB action memory. A 304 or unchanged source-qualified hash skips catalog writes; this still runs the begin and finish mutations. Parsed catalogs must satisfy the configured usable-row minimums before writes.
 
 Normalization rejects malformed pricing, dates and reasoning bounds. Dates are calendar-valid `YYYY-MM-DD` or month-only `YYYY-MM` strings, stored verbatim; a month-only date compares lower than every full date in the same month, so `order: "release"` (newest first) lists it after them. A `budget_tokens` `min` must be at least -1 and `max` at least 0. A `status` string is stored verbatim; a non-string `status` makes the model malformed. Retained strings must be well-formed Unicode and fit in 16 KiB of UTF-8; indexed strings (`modelsDevProviderId`, `modelsDevModelId`, `family`, `modelsDevCanonicalModelId`, `releaseDate` and `searchText`) fit in 1 KiB; arrays and objects have at most 128 entries; normalized model rows fit in 4 KiB and normalized provider rows in 64 KiB of serialized JSON. Malformed models are skipped and their stored rows are preserved; malformed providers and their models are skipped and their stored rows are preserved. Unknown upstream fields are ignored.
 
@@ -199,10 +199,10 @@ Thrown errors are `ConvexError<ModelsDevErrorData>`. `isModelsDevError` checks t
 
 | Code                           | Message                                                           | When                                                           |
 | ------------------------------ | ----------------------------------------------------------------- | -------------------------------------------------------------- |
-| `MODELS_DEV_INVALID_ARGUMENT`  | An argument is malformed or outside its bounds.                   | Invalid query, usage or table-backed configuration arguments.  |
+| `MODELS_DEV_INVALID_ARGUMENT`  | An argument is missing, malformed or out of bounds.               | Invalid query, usage or table-backed configuration arguments.  |
 | `MODELS_DEV_PROVIDER_ERROR`    | The catalog provider returned a failure response.                 | An HTTP response has a failure status.                         |
-| `MODELS_DEV_NETWORK_ERROR`     | The catalog request or body read failed.                          | Fetch or a body read throws or times out.                      |
-| `MODELS_DEV_INVALID_RESPONSE`  | The catalog response is malformed.                                | A successful response cannot be parsed as a catalog.           |
+| `MODELS_DEV_NETWORK_ERROR`     | The request to models.dev failed before a response arrived.       | Fetch or a body read throws or times out.                      |
+| `MODELS_DEV_INVALID_RESPONSE`  | The catalog response is malformed.                                | A 3xx response, or a body that is not UTF-8 or not a catalog.  |
 | `MODELS_DEV_CATALOG_TOO_SMALL` | The catalog has fewer usable providers or models than configured. | Usable-row floors prevent catalog writes.                      |
 | `MODELS_DEV_CATALOG_TOO_LARGE` | The catalog exceeds 8 MiB.                                        | Declared or streamed download bytes exceed the limit.          |
 | `MODELS_DEV_SYNC_FAILED`       | The catalog sync failed.                                          | A catalog write or another step without a specific code fails. |
@@ -243,9 +243,9 @@ register(t);
 | Arrays and objects                           | 128 entries                                                |
 | Normalized row                               | 4 KiB (model) or 64 KiB (provider) of serialized JSON      |
 | Upsert batch                                 | 100 rows or 512 KiB of serialized JSON                     |
-| History deletion per cron tick               | 20 batches of 500 documents                                |
+| History deletion batch                       | 500 documents; a full batch schedules the next             |
 
-Enabled cron ticks delete expired history in at most 20 batches of 500 documents. Each deletion mutation rereads `enabled` and `retentionDays`. History records model additions, removals, price changes and tier changes. `syncState` and `config` are singletons. Download, normalization, batch and query bounds are described above.
+The hourly `cleanup` cron runs whether or not `enabled` is set and whether or not syncs succeed. Each run reads `retentionDays` and deletes at most 500 expired history documents; a run that fills its batch schedules another run. History records model additions, removals, price changes and tier changes. `syncState` and `config` are singletons. Download, normalization, batch and query bounds are described above.
 
 ## Security
 

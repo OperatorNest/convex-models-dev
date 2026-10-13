@@ -552,6 +552,32 @@ describe("source fallback", () => {
       "MODELS_DEV_NETWORK_ERROR",
     ]);
   });
+
+  test("a redirect is an invalid response and is never followed", async () => {
+    const t = setup();
+    await relaxGuards(t);
+    const calls = stubFetch(
+      () =>
+        new Response(null, { status: 301, headers: { location: "https://example.com/api.json" } }),
+    );
+    const result = await sync(t);
+    expect(result.errors.map(({ code }) => code)).toEqual([
+      "MODELS_DEV_INVALID_RESPONSE",
+      "MODELS_DEV_INVALID_RESPONSE",
+    ]);
+    expect(calls.map(({ init }) => init.redirect)).toEqual(["manual", "manual"]);
+  });
+
+  test("a body that is not well-formed UTF-8 is an invalid response", async () => {
+    const t = setup();
+    await relaxGuards(t);
+    stubFetch(() => new Response(new Uint8Array([0x7b, 0xff, 0x7d])));
+    const result = await sync(t);
+    expect(result.errors.map(({ code }) => code)).toEqual([
+      "MODELS_DEV_INVALID_RESPONSE",
+      "MODELS_DEV_INVALID_RESPONSE",
+    ]);
+  });
 });
 
 describe("lease", () => {
@@ -891,10 +917,9 @@ describe("configure and tick", () => {
     expect(afterTick.lastCheckedAt).toBe(NOW + 60 * 60_000);
   });
 
-  test("tick deletes price history older than the retention window in batches", async () => {
+  test("cleanup deletes price history older than the retention window in self-scheduled batches", async () => {
     const t = setup();
-    await relaxGuards(t);
-    catalogServer({ body: fixtureJson() });
+    catalogServer({ body: fixtureJson() }).failAll = true;
     await t.mutation(api.config.update, { retentionDays: 30 });
     const day = 24 * 60 * 60 * 1000;
     await t.run(async (ctx) => {
@@ -914,6 +939,9 @@ describe("configure and tick", () => {
       });
     });
     await t.action(internal.sync.tick, {});
+    expect(await changes(t)).toHaveLength(521);
+    await t.mutation(internal.cleanup.run, {});
+    expect(await changes(t)).toHaveLength(21);
     await drain(t);
     const left = await changes(t);
     expect(left).toHaveLength(1);
@@ -1286,11 +1314,18 @@ function streamedResponse(body: string, chunkBytes: number, headers?: Record<str
   );
 }
 
-test("a catalog streamed without content-length grows its buffer and reads completely", async () => {
+test("a catalog streamed without content-length reads completely", async () => {
   const t = setupTest();
   await relaxGuards(t);
   const body = fixtureJson().padEnd(3 * 1024 * 1024 + 7, " ");
   stubFetch(() => streamedResponse(body, 64 * 1024));
+  expect(await sync(t)).toMatchObject({ status: "ok", modelCount: FIXTURE_MODEL_COUNT });
+});
+
+test("a catalog with a leading byte order mark syncs", async () => {
+  const t = setupTest();
+  await relaxGuards(t);
+  stubFetch(() => new Response(`\uFEFF${fixtureJson()}`));
   expect(await sync(t)).toMatchObject({ status: "ok", modelCount: FIXTURE_MODEL_COUNT });
 });
 

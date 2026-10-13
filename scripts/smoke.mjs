@@ -2,31 +2,25 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { cpSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { join, resolve } from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
 import { ConvexHttpClient } from "convex/browser";
 import { anyApi } from "convex/server";
 import ts from "typescript";
-import { runSmoke, smokeEnv, step } from "./smoke-harness.mjs";
+import { assertSmoke, errorCodeOf, runSmoke, smokeEnv, step, waitFor } from "./smoke-harness.mjs";
 
 const root = resolve(import.meta.dirname, "..");
-const SYNC_TIMEOUT_MS = 120_000;
-const POLL_INTERVAL_MS = 250;
 const GENERATED_PROVIDER_COUNT = 50;
 const GENERATED_MODELS_PER_PROVIDER = 20;
 const LIVE_SOURCE_URLS = ["https://models.dev/api.json", "https://models.opencode.ai/api.json"];
 const DEPLOYED_CONFIG_PATHS = ["src/component/config.ts", "dist/component/config.js"];
 
-let checks = 0;
-
-function check(condition, message) {
-  if (!condition) throw new Error(message);
-  checks++;
+function rejectionCode(promise) {
+  return promise.then(() => "accepted", errorCodeOf);
 }
 
-function errorCode(promise) {
+function cliRejectionCode(promise) {
   return promise.then(
     () => "accepted",
-    (error) => /MODELS_DEV_[A-Z_]+/.exec(String(error.message))?.[0] ?? "unknown",
+    (error) => /MODELS_DEV_[A-Z_]+/.exec(String(error.message))?.[0],
   );
 }
 
@@ -204,7 +198,7 @@ async function journey(backend) {
         [join(root, "node_modules/@typescript/native/bin/tsc"), "--noEmit"],
         { cwd: consumer, env: smokeEnv, encoding: "utf8" },
       );
-      check(
+      assertSmoke(
         typecheck.status === 0,
         `strict tarball consumer typecheck exited ${typecheck.status}: ${typecheck.stdout}`,
       );
@@ -222,7 +216,7 @@ async function journey(backend) {
         consumerTest.status === 0
           ? JSON.parse(readFileSync(join(consumer, "test-report.json"), "utf8"))
           : undefined;
-      check(
+      assertSmoke(
         report?.numPassedTests === 1 && report.numTotalTests === 1,
         `tarball consumer test exited ${consumerTest.status}: ${consumerTest.stderr}`,
       );
@@ -230,18 +224,15 @@ async function journey(backend) {
   );
 
   await step("first cron sync reads only the local fixture server", async () => {
-    const deadline = Date.now() + SYNC_TIMEOUT_MS;
-    let status = await query("syncStatus");
-    while (status.running || status.lastCheckedAt === undefined) {
-      if (Date.now() > deadline) throw new Error("first cron sync did not finish");
-      await sleep(POLL_INTERVAL_MS);
-      status = await query("syncStatus");
-    }
-    check(
+    const status = await waitFor(async () => {
+      const current = await query("syncStatus");
+      return !current.running && current.lastCheckedAt !== undefined && current;
+    });
+    assertSmoke(
       source.requests[0] === "/primary",
       `first fixture request ${JSON.stringify(source.requests[0])}`,
     );
-    check(
+    assertSmoke(
       status.state === "ok" && status.sourceUrl === primaryUrl && status.errors.length === 0,
       `cron sync state ${status.state} from ${status.sourceUrl}`,
     );
@@ -252,9 +243,9 @@ async function journey(backend) {
     source.body = `${source.body} `;
     source.etag = '"fixture-forced"';
     const synced = await action("syncForced");
-    check(synced.status === "ok", `sync status ${synced.status}`);
+    assertSmoke(synced.status === "ok", `sync status ${synced.status}`);
     const status = await query("syncStatus");
-    check(
+    assertSmoke(
       status.modelCount ===
         fixtureModelCount + GENERATED_PROVIDER_COUNT * GENERATED_MODELS_PER_PROVIDER &&
         status.providerCount === fixtureProviderCount + GENERATED_PROVIDER_COUNT &&
@@ -266,8 +257,8 @@ async function journey(backend) {
   });
 
   await step("interval floor skips sync and an unchanged ETag is not modified", async () => {
-    check((await action("syncNow")).reason === "min_interval", "interval floor failed");
-    check((await action("syncForced")).status === "not_modified", "conditional fetch failed");
+    assertSmoke((await action("syncNow")).reason === "min_interval", "interval floor failed");
+    assertSmoke((await action("syncForced")).status === "not_modified", "conditional fetch failed");
   });
 
   await step("pages do not overlap and model lookup reads stored prices", async () => {
@@ -276,13 +267,13 @@ async function journey(backend) {
       paginationOpts: { cursor: first.continueCursor, numItems: 10 },
     });
     const firstKeys = new Set(first.page.map(keyOf));
-    check(
+    assertSmoke(
       first.page.length === 10 &&
         next.page.length === 10 &&
         next.page.every((row) => !firstKeys.has(keyOf(row))),
       "pagination overlapped",
     );
-    check(
+    assertSmoke(
       (await query("getModel", { key: "openai/gpt-5.4" })).costInput === 2.5,
       "model lookup failed",
     );
@@ -299,7 +290,7 @@ async function journey(backend) {
       cursor = result.continueCursor;
       isDone = result.isDone;
     }
-    check(
+    assertSmoke(
       embedding.length === 1 &&
         embedding[0].modelsDevModelId === "qwen/qwen3-embedding-8b" &&
         embedding[0].limit.context === 32768 &&
@@ -309,7 +300,7 @@ async function journey(backend) {
   });
 
   await step("cost estimate prices usage and rejects unsafe token counts", async () => {
-    check(
+    assertSmoke(
       (await query("costOfUsage", {
         mode: null,
         inputTokenScope: "includesCache",
@@ -319,8 +310,8 @@ async function journey(backend) {
       })) === 10_500_000,
       "cost differs",
     );
-    check(
-      (await errorCode(
+    assertSmoke(
+      (await rejectionCode(
         query("costOfUsage", {
           mode: null,
           inputTokenScope: "includesCache",
@@ -332,8 +323,8 @@ async function journey(backend) {
       "unsafe usage accepted",
     );
     for (const count of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1])
-      check(
-        (await errorCode(
+      assertSmoke(
+        (await cliRejectionCode(
           component("models:estimateCost", {
             mode: null,
             inputTokenScope: "includesCache",
@@ -344,7 +335,7 @@ async function journey(backend) {
         )) === "MODELS_DEV_INVALID_ARGUMENT",
         `token count ${count} accepted`,
       );
-    check(
+    assertSmoke(
       (
         await component("models:estimateCost", {
           inputTokenScope: "includesCache",
@@ -359,13 +350,13 @@ async function journey(backend) {
   });
 
   await step("cheapest queries rank capability and provider ranges", async () => {
-    check((await query("cheapestWithTools")).models.length > 0, "capability query empty");
+    assertSmoke((await query("cheapestWithTools")).models.length > 0, "capability query empty");
     const providerIds = ["openai", "anthropic"];
     const cheapest = await component("models:listCheapest", {
       modelsDevProviderIds: providerIds,
       limit: 20,
     });
-    check(
+    assertSmoke(
       cheapest.isComplete &&
         cheapest.models.length > 0 &&
         cheapest.models.every((row) => providerIds.includes(row.modelsDevProviderId)),
@@ -375,16 +366,17 @@ async function journey(backend) {
 
   await step("page bounds reject malformed cursors and ignore caller read budgets", async () => {
     for (const cursor of ["not-json", "{}", "[{}]", `[${'"a",'.repeat(2048)}"a"]`])
-      check(
-        (await errorCode(component("models:list", { paginationOpts: { numItems: 1, cursor } }))) ===
-          "MODELS_DEV_INVALID_ARGUMENT",
+      assertSmoke(
+        (await cliRejectionCode(
+          component("models:list", { paginationOpts: { numItems: 1, cursor } }),
+        )) === "MODELS_DEV_INVALID_ARGUMENT",
         `cursor ${cursor.slice(0, 16)} accepted`,
       );
     const pinned = await component("models:list", {
       includeDeprecated: true,
       paginationOpts: { numItems: 1, cursor: null, endCursor: "[]" },
     });
-    check(
+    assertSmoke(
       pinned.pageStatus === "SplitRequired" &&
         typeof pinned.splitCursor === "string" &&
         pinned.page.length <= 2,
@@ -394,20 +386,20 @@ async function journey(backend) {
       includeDeprecated: true,
       paginationOpts: { numItems: 10, cursor: null, maximumRowsRead: 1, maximumBytesRead: 1 },
     });
-    check(budgeted.page.length === 10, "caller read budget applied");
+    assertSmoke(budgeted.page.length === 10, "caller read budget applied");
   });
 
   await step("config rejects insecure and oversized source URLs", async () => {
     for (const sourceUrl of ["http://example.com", "https://example.com/" + "a".repeat(2048)])
-      check(
-        (await errorCode(component("config:update", { sourceUrl }))) ===
+      assertSmoke(
+        (await cliRejectionCode(component("config:update", { sourceUrl }))) ===
           "MODELS_DEV_INVALID_ARGUMENT",
         `source URL ${sourceUrl.slice(0, 24)} accepted`,
       );
   });
 
   await step("anonymous callers cannot read or run maintenance", async () => {
-    check(
+    assertSmoke(
       await publicClient.query(anyApi.example.syncStatus, {}).then(
         () => false,
         (error) => error.message.includes("Not signed in."),
@@ -418,7 +410,7 @@ async function journey(backend) {
       ["mutation", "configureSync"],
       ["action", "syncNow"],
     ])
-      check(
+      assertSmoke(
         await publicClient[method](anyApi.example[name], {}).then(
           () => false,
           () => true,
@@ -434,16 +426,16 @@ async function journey(backend) {
       unicode.openai.models["gpt-5.4"].name = "x".repeat(499) + "😀";
       source.body = JSON.stringify(unicode);
       source.etag = '"fixture-2"';
-      check((await action("syncForced")).status === "ok", "Unicode catalog rejected");
+      assertSmoke((await action("syncForced")).status === "ok", "Unicode catalog rejected");
       const stored = await query("getModel", { key: "openai/gpt-5.4" });
-      check(stored.name.endsWith("😀"), "Unicode string changed");
+      assertSmoke(stored.name.endsWith("😀"), "Unicode string changed");
 
       const oversized = JSON.parse(source.body);
       oversized.openai.models["gpt-5.4"].family = "😀".repeat(257);
       source.body = JSON.stringify(oversized);
       source.etag = '"fixture-index-bound"';
       const skipped = await action("syncForced");
-      check(
+      assertSmoke(
         skipped.status === "ok" &&
           skipped.skippedModels === 1 &&
           JSON.stringify(await query("getModel", { key: "openai/gpt-5.4" })) ===
@@ -455,7 +447,7 @@ async function journey(backend) {
       malformedProvider.openai = null;
       source.body = JSON.stringify(malformedProvider);
       source.etag = '"fixture-invalid-provider"';
-      check(
+      assertSmoke(
         (await action("syncForced")).status === "ok" &&
           JSON.stringify(await query("getModel", { key: "openai/gpt-5.4" })) ===
             JSON.stringify(stored),
@@ -469,7 +461,7 @@ async function journey(backend) {
     source.body = source.body.padEnd(8 * 1024 * 1024 + 1, " ");
     source.etag = '"fixture-large"';
     const tooLarge = await action("syncForced");
-    check(
+    assertSmoke(
       tooLarge.status === "error" &&
         tooLarge.errors.length === 2 &&
         tooLarge.errors.every((error) => error.code === "MODELS_DEV_CATALOG_TOO_LARGE"),
@@ -478,7 +470,7 @@ async function journey(backend) {
     source.body = savedBody;
     source.isFailing = true;
     const failed = await action("syncForced");
-    check(
+    assertSmoke(
       failed.status === "error" &&
         failed.errors.length === 2 &&
         failed.errors[0].source === "primary" &&
@@ -489,19 +481,19 @@ async function journey(backend) {
         failed.errors[1].source === "fallback",
       "upstream error differs",
     );
-    check(
+    assertSmoke(
       JSON.stringify((await query("syncStatus")).errors) === JSON.stringify(failed.errors),
       "stored error differs",
     );
   });
 
   await step("every catalog request reached the local fixture server", () => {
-    check(
+    assertSmoke(
       source.requests.length > 0 &&
         source.requests.every((path) => path === "/primary" || path === "/fallback"),
       `unexpected fixture requests ${JSON.stringify(source.requests)}`,
     );
-    console.log(`${checks} checks; ${source.requests.length} fixture catalog requests`);
+    console.log(`${source.requests.length} fixture catalog requests`);
   });
 }
 

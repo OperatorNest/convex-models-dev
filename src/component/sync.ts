@@ -2,7 +2,6 @@ import { paginator } from "convex-helpers/server/pagination";
 import { paginationResultValidator } from "convex/server";
 import { v } from "convex/values";
 import schema from "./schema.js";
-import { internal } from "./_generated/api.js";
 import {
   action,
   internalAction,
@@ -31,7 +30,6 @@ import {
 import { runSync } from "./syncCore.js";
 
 const LEASE_MS = 3 * 60 * 1000;
-const DAY_MS = 24 * 60 * 60 * 1000;
 const CRON_TOLERANCE_MS = 5 * 60 * 1000;
 
 export const getStatus = query({
@@ -92,11 +90,6 @@ export const tick = internalAction({
   returns: v.null(),
   handler: async (ctx) => {
     await runSync(ctx, { force: false, cron: true });
-
-    for (let i = 0; i < 20; i++) {
-      const deleted = await ctx.runMutation(internal.sync.cleanupPriceChanges, {});
-      if (deleted < 500) break;
-    }
     return null;
   },
 });
@@ -423,21 +416,5 @@ export const finish = internalMutation({
       ...(args.status === "ok" && { lastSyncedAt: now, ...args.stats }),
     });
     return true;
-  },
-});
-
-export const cleanupPriceChanges = internalMutation({
-  args: {},
-  returns: v.number(),
-  handler: async (ctx) => {
-    const config = await loadConfig(ctx);
-    if (!config.enabled) return 0;
-    const cutoff = Date.now() - config.retentionDays * DAY_MS;
-    const rows = await ctx.db
-      .query("priceChanges")
-      .withIndex("by_changedAt", (q) => q.lt("changedAt", cutoff))
-      .take(500);
-    for (const row of rows) await ctx.db.delete("priceChanges", row._id);
-    return rows.length;
   },
 });
