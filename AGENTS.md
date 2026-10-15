@@ -31,17 +31,7 @@ A fresh checkout needs `CONVEX_AGENT_MODE=anonymous pnpm exec convex init` befor
 
 ## Toolchain and verification
 
-Use Node 24 and pnpm 12.9.1 through mise. Enable `strict`, `noUncheckedIndexedAccess`, `noImplicitOverride` and `noFallthroughCasesInSwitch`. Keep `exactOptionalPropertyTypes` disabled because imported `convex-helpers` TypeScript source fails it; recheck on each upgrade.
-
-Start with affected tests and formatting, then run the required checks:
-
-| Change                              | Checks                                                                          |
-| ----------------------------------- | ------------------------------------------------------------------------------- |
-| Component, schema or shared runtime | `pnpm build:codegen`, `pnpm test`, `pnpm typecheck`, `pnpm smoke`               |
-| Client or exports                   | `pnpm build`, `pnpm typecheck`, `pnpm knip`, affected client tests, `pnpm test` |
-| Tooling or repository rules         | `pnpm check`                                                                    |
-| Prose Markdown                      | `pnpm fmt:check`                                                                |
-| Executable docs                     | Formatting, affected example/client tests and smoke for runtime claims          |
+Enable `strict`, `noUncheckedIndexedAccess`, `noImplicitOverride` and `noFallthroughCasesInSwitch`. Keep `exactOptionalPropertyTypes` disabled because imported `convex-helpers` TypeScript source fails it; recheck on each upgrade.
 
 Tests stub fetch and call `relaxGuards` for small fixtures. Component tests use `setupTest` and `required`, and assert errors with `expectModelsDevError`; shared helpers belong in `src/test-helpers.ts`. Use `vi.setSystemTime` for clock-dependent assertions and restore timers after each test. Coverage floors are at least 90% statements and 85% branches; never weaken gates.
 
